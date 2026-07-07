@@ -1,0 +1,11 @@
+{
+  "name": "pi-openlimits",
+  "version": "0.1.0",
+  "description": "Simple Pi Coding Agent extension that registers OpenLimits models as providers.",
+  "type": "module",
+  "main": "index.ts",
+  "private": true,
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
