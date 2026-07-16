@@ -23,11 +23,7 @@ import {
 } from "./catalog.ts";
 import { resolveKey } from "./auth.ts";
 import { fetchLiveCatalog, type LiveCatalog } from "./docs-fetcher.ts";
-import {
-  measureImageHeavyPayload,
-  preparePayloadForCompaction,
-  OPENLIMITS_BODY_COMPACTION_BYTES,
-} from "./payload-guard.ts";
+import { preparePayloadForCompaction } from "./payload-guard.ts";
 
 type CatalogKey = keyof LiveCatalog;
 const CATALOG_TTL_MS = 4 * 60 * 60 * 1_000;
@@ -48,13 +44,11 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
   let inFlightCatalog: Promise<LiveCatalog> | undefined;
   let consecutiveUpstreamRejections = 0;
   let errorRecoveryAttempted = false;
-  let oversizedRequestPending = false;
   let sanitizeNextCompactionRequest = false;
 
   pi.on("session_start", () => {
     consecutiveUpstreamRejections = 0;
     errorRecoveryAttempted = false;
-    oversizedRequestPending = false;
     sanitizeNextCompactionRequest = false;
   });
 
@@ -65,7 +59,6 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
   pi.on("session_compact", (_event, ctx) => {
     if (ctx.model?.provider !== "openlimits-codex") return;
     consecutiveUpstreamRejections = 0;
-    oversizedRequestPending = false;
   });
 
   pi.on("before_provider_request", (event, ctx) => {
@@ -76,9 +69,6 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
       return preparePayloadForCompaction(event.payload);
     }
 
-    const payloadBytes = measureImageHeavyPayload(event.payload);
-    oversizedRequestPending = payloadBytes !== undefined
-      && payloadBytes > OPENLIMITS_BODY_COMPACTION_BYTES;
   });
 
   pi.on("message_end", (event, ctx) => {
@@ -93,19 +83,16 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
       if (message.role === "assistant" && message.stopReason !== "error") {
         consecutiveUpstreamRejections = 0;
         errorRecoveryAttempted = false;
-        oversizedRequestPending = false;
       }
       return;
     }
 
     // Native Pi owns retry, compaction, continuation, and the one-recovery cap.
     // We only classify OpenLimits' otherwise-generic 400: the first two are
-    // transient retries; the third (or an oversized request) is an overflow.
+    // transient retries; the third is an overflow.
     if (errorRecoveryAttempted) return;
     consecutiveUpstreamRejections += 1;
-    const shouldCompact = oversizedRequestPending
-      || consecutiveUpstreamRejections >= UPSTREAM_400_COMPACTION_COUNT;
-    oversizedRequestPending = false;
+    const shouldCompact = consecutiveUpstreamRejections >= UPSTREAM_400_COMPACTION_COUNT;
 
     if (shouldCompact) {
       errorRecoveryAttempted = true;
