@@ -24,57 +24,107 @@ import {
 import { resolveKey } from "./auth.ts";
 import { fetchLiveCatalog, type LiveCatalog } from "./docs-fetcher.ts";
 import {
-  countEmbeddedImages,
   measureImageHeavyPayload,
   preparePayloadForCompaction,
   OPENLIMITS_BODY_COMPACTION_BYTES,
-  OPENLIMITS_IMAGE_COMPACTION_COUNT,
 } from "./payload-guard.ts";
 
 type CatalogKey = keyof LiveCatalog;
 const CATALOG_TTL_MS = 4 * 60 * 60 * 1_000;
+const UPSTREAM_400_COMPACTION_COUNT = 3;
+
+export function isOpenLimitsUpstreamRejection(message: unknown): boolean {
+  if (typeof message !== "object" || message === null) return false;
+  const candidate = message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown };
+  return candidate.role === "assistant"
+    && candidate.stopReason === "error"
+    && typeof candidate.errorMessage === "string"
+    && candidate.errorMessage.includes("OpenAI API error (400)")
+    && candidate.errorMessage.includes("The upstream provider rejected the request.");
+}
 
 export default function openlimitsPlugin(pi: ExtensionAPI): void {
   const { apiKey } = resolveKey();
   let inFlightCatalog: Promise<LiveCatalog> | undefined;
-  let compactingOversizedPayload = false;
+  let compactingForRecovery = false;
+  let consecutiveUpstreamRejections = 0;
+  let errorRecoveryAttempted = false;
 
   pi.on("session_start", () => {
-    compactingOversizedPayload = false;
+    compactingForRecovery = false;
+    consecutiveUpstreamRejections = 0;
+    errorRecoveryAttempted = false;
   });
+
+  const compactAndContinue = (
+    ctx: Parameters<Parameters<ExtensionAPI["on"]>[1]>[1],
+    reason: string,
+    abortCurrentRequest: boolean,
+  ): void => {
+    if (compactingForRecovery) return;
+    compactingForRecovery = true;
+    ctx.ui.notify(`${reason}; compacting automatically`, "warning");
+    if (abortCurrentRequest) ctx.abort();
+    ctx.compact({
+      customInstructions:
+        "Preserve the active task, completed work, decisions, errors, and the assistant's conclusions about inspected images. Older image binaries and duplicate automatic checkpoints can be omitted.",
+      onComplete: () => {
+        compactingForRecovery = false;
+        consecutiveUpstreamRejections = 0;
+        ctx.ui.notify("Automatic OpenLimits compaction completed; continuing", "info");
+        pi.sendUserMessage("Continúa desde el punto donde la compactación automática interrumpió la tarea.");
+      },
+      onError: (error) => {
+        compactingForRecovery = false;
+        ctx.ui.notify(`Automatic OpenLimits compaction failed: ${error.message}`, "error");
+      },
+    });
+  };
 
   pi.on("before_provider_request", (event, ctx) => {
     if (ctx.model?.provider !== "openlimits-codex") return;
 
-    const imageCount = countEmbeddedImages(event.payload);
+    // Recovery compaction requests must be sanitized even when the original
+    // failure was not caused by the 50 MiB body threshold.
+    if (compactingForRecovery) return preparePayloadForCompaction(event.payload);
+
     const payloadBytes = measureImageHeavyPayload(event.payload);
-    const exceedsBodyLimit = payloadBytes !== undefined && payloadBytes > OPENLIMITS_BODY_COMPACTION_BYTES;
-    const exceedsImageLimit = imageCount > OPENLIMITS_IMAGE_COMPACTION_COUNT;
-    if (!exceedsBodyLimit && !exceedsImageLimit) return;
+    if (payloadBytes === undefined || payloadBytes <= OPENLIMITS_BODY_COMPACTION_BYTES) return;
 
     // The compaction summary request sees the same historical images. Strip
     // them from that one request so compaction itself can get under the limit.
-    if (compactingOversizedPayload) return preparePayloadForCompaction(event.payload);
+    compactAndContinue(
+      ctx,
+      `OpenLimits request reached ${(payloadBytes / 1024 / 1024).toFixed(1)} MiB`,
+      true,
+    );
+  });
 
-    compactingOversizedPayload = true;
-    const reason = exceedsBodyLimit
-      ? `${(payloadBytes! / 1024 / 1024).toFixed(1)} MiB`
-      : `${imageCount} historical images`;
-    ctx.ui.notify(`OpenLimits request reached ${reason}; compacting automatically`, "warning");
-    ctx.abort();
-    ctx.compact({
-      customInstructions:
-        "Preserve the active task, completed work, decisions, errors, and the assistant's conclusions about inspected images. Older image binaries can be omitted.",
-      onComplete: () => {
-        compactingOversizedPayload = false;
-        ctx.ui.notify("Automatic OpenLimits image compaction completed; continuing", "info");
-        pi.sendUserMessage("Continúa desde el punto donde la compactación automática interrumpió la tarea.");
-      },
-      onError: (error) => {
-        compactingOversizedPayload = false;
-        ctx.ui.notify(`Automatic OpenLimits image compaction failed: ${error.message}`, "error");
-      },
-    });
+  pi.on("message_end", (event, ctx) => {
+    if (ctx.model?.provider !== "openlimits-codex") return;
+    const message = event.message as { role?: unknown; stopReason?: unknown };
+    if (!isOpenLimitsUpstreamRejection(event.message)) {
+      if (message.role === "assistant") consecutiveUpstreamRejections = 0;
+      return;
+    }
+
+    consecutiveUpstreamRejections += 1;
+    if (
+      consecutiveUpstreamRejections < UPSTREAM_400_COMPACTION_COUNT
+      && !errorRecoveryAttempted
+      && !compactingForRecovery
+    ) {
+      pi.sendUserMessage("Reintenta la solicitud anterior después del error temporal de OpenLimits.");
+      return;
+    }
+    if (
+      consecutiveUpstreamRejections === UPSTREAM_400_COMPACTION_COUNT
+      && !errorRecoveryAttempted
+      && !compactingForRecovery
+    ) {
+      errorRecoveryAttempted = true;
+      compactAndContinue(ctx, "OpenLimits rejected 3 consecutive requests with HTTP 400", false);
+    }
   });
 
   const refresh = (

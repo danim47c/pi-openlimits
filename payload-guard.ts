@@ -1,12 +1,6 @@
 // OpenLimits' upstream gateway rejects request bodies around 54 MiB. Keep a
 // safety margin so headers/serialization changes do not move requests over it.
 export const OPENLIMITS_BODY_COMPACTION_BYTES = 50 * 1024 * 1024;
-// A real session remained valid with 25 screenshots and began receiving a
-// generic upstream 400 immediately after the 26th. The same 26 images succeed
-// in a fresh request, so this is a cumulative multimodal-context limit rather
-// than a per-image or raw body-size limit. Compact before retaining more than
-// 25 historical images in one request.
-export const OPENLIMITS_IMAGE_COMPACTION_COUNT = 25;
 const BODY_MEASUREMENT_IMAGE_BYTES = 32 * 1024 * 1024;
 const OMITTED_IMAGE_TEXT = "[Historical image omitted while generating an automatic compaction summary]";
 
@@ -24,17 +18,6 @@ export function countEmbeddedImageBytes(value: unknown): number {
   }
   for (const [key, child] of Object.entries(value)) {
     if (key !== "image_url") total += countEmbeddedImageBytes(child);
-  }
-  return total;
-}
-
-export function countEmbeddedImages(value: unknown): number {
-  if (Array.isArray(value)) return value.reduce((total, item) => total + countEmbeddedImages(item), 0);
-  if (!isRecord(value)) return 0;
-
-  let total = value.type === "input_image" && typeof value.image_url === "string" ? 1 : 0;
-  for (const [key, child] of Object.entries(value)) {
-    if (key !== "image_url") total += countEmbeddedImages(child);
   }
   return total;
 }

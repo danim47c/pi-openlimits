@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  countEmbeddedImages,
   countEmbeddedImageBytes,
   measureImageHeavyPayload,
   omitImagesForCompaction,
@@ -20,15 +19,6 @@ describe("OpenLimits image payload guard", () => {
 
   test("counts embedded image URLs without counting normal text", () => {
     expect(countEmbeddedImageBytes(payload)).toBe(Buffer.byteLength("data:image/png;base64,AAAA"));
-    expect(countEmbeddedImages(payload)).toBe(1);
-  });
-
-  test("counts historical images independently of their encoded size", () => {
-    const images = Array.from({ length: 26 }, () => ({
-      type: "input_image",
-      image_url: "data:image/png;base64,AA==",
-    }));
-    expect(countEmbeddedImages({ input: images })).toBe(26);
   });
 
   test("skips full JSON measurement for small image payloads", () => {
@@ -45,7 +35,6 @@ describe("OpenLimits image payload guard", () => {
       },
     ]);
     expect(countEmbeddedImageBytes(compacted)).toBe(0);
-    expect(countEmbeddedImages(compacted)).toBe(0);
   });
 
   test("keeps only the latest repeated pi-goal checkpoint during compaction", () => {

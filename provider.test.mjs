@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import openlimitsPlugin from "./index.ts";
+import openlimitsPlugin, { isOpenLimitsUpstreamRejection } from "./index.ts";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -102,5 +102,93 @@ describe("provider registration", () => {
     expect(calls).toBe(0);
     expect(models[0]).toMatchObject({ id: "gpt-cached", api: "openai-responses" });
     expect("provider" in models[0]).toBe(false);
+  });
+});
+
+describe("upstream 400 recovery", () => {
+  const upstreamError = {
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: "OpenAI API error (400): {\"message\":\"The upstream provider rejected the request.\"}",
+  };
+
+  test("recognizes only the generic OpenLimits upstream rejection", () => {
+    expect(isOpenLimitsUpstreamRejection(upstreamError)).toBe(true);
+    expect(isOpenLimitsUpstreamRejection({ ...upstreamError, errorMessage: "OpenAI API error (429)" })).toBe(false);
+    expect(isOpenLimitsUpstreamRejection({ ...upstreamError, stopReason: "stop" })).toBe(false);
+  });
+
+  test("compacts once after 3 consecutive rejections and does not loop", () => {
+    const handlers = new Map();
+    const compactions = [];
+    const sent = [];
+    openlimitsPlugin({
+      on: (event, handler) => handlers.set(event, handler),
+      registerProvider: () => {},
+      sendUserMessage: (message) => sent.push(message),
+    });
+    const ctx = {
+      model: { provider: "openlimits-codex" },
+      ui: { notify: () => {} },
+      abort: () => { throw new Error("message_end recovery must not abort an ended request"); },
+      compact: (options) => compactions.push(options),
+    };
+    const messageEnd = handlers.get("message_end");
+
+    messageEnd({ message: upstreamError }, ctx);
+    messageEnd({ message: upstreamError }, ctx);
+    expect(compactions).toHaveLength(0);
+    expect(sent).toHaveLength(2);
+    messageEnd({ message: upstreamError }, ctx);
+    expect(compactions).toHaveLength(1);
+
+    const checkpoint = {
+      role: "user",
+      content: [{ type: "input_text", text: '<pi_goal_continuation kind="checkpoint">GOAL CHECKPOINT' }],
+    };
+    const sanitized = handlers.get("before_provider_request")({
+      payload: {
+        input: [
+          checkpoint,
+          { role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] },
+          checkpoint,
+        ],
+      },
+    }, ctx);
+    expect(sanitized.input).toEqual([
+      { role: "user", content: [{ type: "input_text", text: "[Historical image omitted while generating an automatic compaction summary]" }] },
+      checkpoint,
+    ]);
+
+    compactions[0].onComplete();
+    expect(sent).toHaveLength(3);
+    messageEnd({ message: upstreamError }, ctx);
+    messageEnd({ message: upstreamError }, ctx);
+    messageEnd({ message: upstreamError }, ctx);
+    expect(compactions).toHaveLength(1);
+    expect(sent).toHaveLength(3);
+  });
+
+  test("a non-error assistant response breaks the consecutive streak", () => {
+    const handlers = new Map();
+    const compactions = [];
+    openlimitsPlugin({
+      on: (event, handler) => handlers.set(event, handler),
+      registerProvider: () => {},
+      sendUserMessage: () => {},
+    });
+    const ctx = {
+      model: { provider: "openlimits-codex" },
+      ui: { notify: () => {} },
+      abort: () => {},
+      compact: (options) => compactions.push(options),
+    };
+    const messageEnd = handlers.get("message_end");
+
+    messageEnd({ message: upstreamError }, ctx);
+    messageEnd({ message: { role: "assistant", stopReason: "stop" } }, ctx);
+    messageEnd({ message: upstreamError }, ctx);
+    messageEnd({ message: upstreamError }, ctx);
+    expect(compactions).toHaveLength(0);
   });
 });
