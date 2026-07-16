@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import openlimitsPlugin, { isOpenLimitsUpstreamRejection } from "./index.ts";
+import { isRetryableAssistantError } from "./node_modules/@earendil-works/pi-ai/dist/utils/retry.js";
+import { isContextOverflow } from "./node_modules/@earendil-works/pi-ai/dist/utils/overflow.js";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -118,31 +120,25 @@ describe("upstream 400 recovery", () => {
     expect(isOpenLimitsUpstreamRejection({ ...upstreamError, stopReason: "stop" })).toBe(false);
   });
 
-  test("compacts once after 3 consecutive rejections and does not loop", () => {
+  test("classifies 2 retries then delegates one compact-and-retry to native Pi", () => {
     const handlers = new Map();
-    const compactions = [];
-    const sent = [];
     openlimitsPlugin({
       on: (event, handler) => handlers.set(event, handler),
       registerProvider: () => {},
-      sendMessage: (message, options) => sent.push({ message, options }),
     });
-    const ctx = {
-      model: { provider: "openlimits-codex" },
-      ui: { notify: () => {} },
-      abort: () => { throw new Error("message_end recovery must not abort an ended request"); },
-      compact: (options) => compactions.push(options),
-    };
+    const ctx = { model: { provider: "openlimits-codex" } };
     const messageEnd = handlers.get("message_end");
 
-    messageEnd({ message: upstreamError }, ctx);
-    messageEnd({ message: upstreamError }, ctx);
-    expect(compactions).toHaveLength(0);
-    expect(sent).toHaveLength(2);
-    expect(sent.every(({ message, options }) => message.display === false && options.triggerTurn === true)).toBe(true);
-    messageEnd({ message: upstreamError }, ctx);
-    expect(compactions).toHaveLength(1);
+    const first = messageEnd({ message: upstreamError }, ctx).message;
+    const second = messageEnd({ message: upstreamError }, ctx).message;
+    expect(isRetryableAssistantError(first)).toBe(true);
+    expect(isRetryableAssistantError(second)).toBe(true);
 
+    const third = messageEnd({ message: upstreamError }, ctx).message;
+    expect(isContextOverflow(third, 372_000)).toBe(true);
+    expect(isRetryableAssistantError(third)).toBe(false);
+
+    handlers.get("session_before_compact")({ reason: "overflow", willRetry: true }, ctx);
     const checkpoint = {
       role: "user",
       content: [{ type: "input_text", text: '<pi_goal_continuation kind="checkpoint">GOAL CHECKPOINT' }],
@@ -161,35 +157,25 @@ describe("upstream 400 recovery", () => {
       checkpoint,
     ]);
 
-    compactions[0].onComplete();
-    expect(sent).toHaveLength(3);
-    messageEnd({ message: upstreamError }, ctx);
-    messageEnd({ message: upstreamError }, ctx);
-    messageEnd({ message: upstreamError }, ctx);
-    expect(compactions).toHaveLength(1);
-    expect(sent).toHaveLength(3);
+    handlers.get("session_compact")({ reason: "overflow", willRetry: true }, ctx);
+    expect(messageEnd({ message: upstreamError }, ctx)).toBeUndefined();
   });
 
   test("a non-error assistant response breaks the consecutive streak", () => {
     const handlers = new Map();
-    const compactions = [];
     openlimitsPlugin({
       on: (event, handler) => handlers.set(event, handler),
       registerProvider: () => {},
-      sendMessage: () => {},
     });
-    const ctx = {
-      model: { provider: "openlimits-codex" },
-      ui: { notify: () => {} },
-      abort: () => {},
-      compact: (options) => compactions.push(options),
-    };
+    const ctx = { model: { provider: "openlimits-codex" } };
     const messageEnd = handlers.get("message_end");
 
     messageEnd({ message: upstreamError }, ctx);
     messageEnd({ message: { role: "assistant", stopReason: "stop" } }, ctx);
-    messageEnd({ message: upstreamError }, ctx);
-    messageEnd({ message: upstreamError }, ctx);
-    expect(compactions).toHaveLength(0);
+    const firstAfterReset = messageEnd({ message: upstreamError }, ctx).message;
+    const secondAfterReset = messageEnd({ message: upstreamError }, ctx).message;
+    expect(isRetryableAssistantError(firstAfterReset)).toBe(true);
+    expect(isRetryableAssistantError(secondAfterReset)).toBe(true);
+    expect(isContextOverflow(secondAfterReset, 372_000)).toBe(false);
   });
 });

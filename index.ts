@@ -46,97 +46,84 @@ export function isOpenLimitsUpstreamRejection(message: unknown): boolean {
 export default function openlimitsPlugin(pi: ExtensionAPI): void {
   const { apiKey } = resolveKey();
   let inFlightCatalog: Promise<LiveCatalog> | undefined;
-  let compactingForRecovery = false;
   let consecutiveUpstreamRejections = 0;
   let errorRecoveryAttempted = false;
-
-  const triggerHiddenRecoveryTurn = (content: string): void => {
-    pi.sendMessage({
-      customType: "pi-openlimits-recovery",
-      content,
-      display: false,
-    }, { triggerTurn: true, deliverAs: "followUp" });
-  };
+  let oversizedRequestPending = false;
+  let sanitizeNextCompactionRequest = false;
 
   pi.on("session_start", () => {
-    compactingForRecovery = false;
     consecutiveUpstreamRejections = 0;
     errorRecoveryAttempted = false;
+    oversizedRequestPending = false;
+    sanitizeNextCompactionRequest = false;
   });
 
-  const compactAndContinue = (
-    ctx: Parameters<Parameters<ExtensionAPI["on"]>[1]>[1],
-    reason: string,
-    abortCurrentRequest: boolean,
-  ): void => {
-    if (compactingForRecovery) return;
-    compactingForRecovery = true;
-    // Any automatic compaction gets one recovery continuation. If that
-    // continuation still receives the same 400, leave the error visible and
-    // stop instead of retrying or compacting again.
-    errorRecoveryAttempted = true;
-    ctx.ui.notify(`${reason}; compacting automatically`, "warning");
-    if (abortCurrentRequest) ctx.abort();
-    ctx.compact({
-      customInstructions:
-        "Preserve the active task, completed work, decisions, errors, and the assistant's conclusions about inspected images. Older image binaries and duplicate automatic checkpoints can be omitted.",
-      onComplete: () => {
-        compactingForRecovery = false;
-        consecutiveUpstreamRejections = 0;
-        ctx.ui.notify("Automatic OpenLimits compaction completed; continuing", "info");
-        triggerHiddenRecoveryTurn("Resume the interrupted task after automatic OpenLimits compaction.");
-      },
-      onError: (error) => {
-        compactingForRecovery = false;
-        ctx.ui.notify(`Automatic OpenLimits compaction failed: ${error.message}`, "error");
-      },
-    });
-  };
+  pi.on("session_before_compact", (_event, ctx) => {
+    if (ctx.model?.provider === "openlimits-codex") sanitizeNextCompactionRequest = true;
+  });
+
+  pi.on("session_compact", (_event, ctx) => {
+    if (ctx.model?.provider !== "openlimits-codex") return;
+    consecutiveUpstreamRejections = 0;
+    oversizedRequestPending = false;
+  });
 
   pi.on("before_provider_request", (event, ctx) => {
     if (ctx.model?.provider !== "openlimits-codex") return;
 
-    // Recovery compaction requests must be sanitized even when the original
-    // failure was not caused by the 50 MiB body threshold.
-    if (compactingForRecovery) return preparePayloadForCompaction(event.payload);
+    if (sanitizeNextCompactionRequest) {
+      sanitizeNextCompactionRequest = false;
+      return preparePayloadForCompaction(event.payload);
+    }
 
     const payloadBytes = measureImageHeavyPayload(event.payload);
-    if (payloadBytes === undefined || payloadBytes <= OPENLIMITS_BODY_COMPACTION_BYTES) return;
-
-    // The compaction summary request sees the same historical images. Strip
-    // them from that one request so compaction itself can get under the limit.
-    compactAndContinue(
-      ctx,
-      `OpenLimits request reached ${(payloadBytes / 1024 / 1024).toFixed(1)} MiB`,
-      true,
-    );
+    oversizedRequestPending = payloadBytes !== undefined
+      && payloadBytes > OPENLIMITS_BODY_COMPACTION_BYTES;
   });
 
   pi.on("message_end", (event, ctx) => {
     if (ctx.model?.provider !== "openlimits-codex") return;
-    const message = event.message as { role?: unknown; stopReason?: unknown };
-    if (!isOpenLimitsUpstreamRejection(event.message)) {
-      if (message.role === "assistant") consecutiveUpstreamRejections = 0;
+    const message = event.message as {
+      role?: unknown;
+      stopReason?: unknown;
+      errorMessage?: unknown;
+    };
+
+    if (!isOpenLimitsUpstreamRejection(message)) {
+      if (message.role === "assistant" && message.stopReason !== "error") {
+        consecutiveUpstreamRejections = 0;
+        errorRecoveryAttempted = false;
+        oversizedRequestPending = false;
+      }
       return;
     }
 
+    // Native Pi owns retry, compaction, continuation, and the one-recovery cap.
+    // We only classify OpenLimits' otherwise-generic 400: the first two are
+    // transient retries; the third (or an oversized request) is an overflow.
+    if (errorRecoveryAttempted) return;
     consecutiveUpstreamRejections += 1;
-    if (
-      consecutiveUpstreamRejections < UPSTREAM_400_COMPACTION_COUNT
-      && !errorRecoveryAttempted
-      && !compactingForRecovery
-    ) {
-      triggerHiddenRecoveryTurn("Retry the previous request after a temporary OpenLimits upstream error.");
-      return;
-    }
-    if (
-      consecutiveUpstreamRejections === UPSTREAM_400_COMPACTION_COUNT
-      && !errorRecoveryAttempted
-      && !compactingForRecovery
-    ) {
+    const shouldCompact = oversizedRequestPending
+      || consecutiveUpstreamRejections >= UPSTREAM_400_COMPACTION_COUNT;
+    oversizedRequestPending = false;
+
+    if (shouldCompact) {
       errorRecoveryAttempted = true;
-      compactAndContinue(ctx, "OpenLimits rejected 3 consecutive requests with HTTP 400", false);
+      return {
+        message: {
+          ...event.message,
+          errorMessage:
+            `Your input exceeds the context window of this model. OpenLimits recovery classification: ${message.errorMessage}`,
+        },
+      };
     }
+
+    return {
+      message: {
+        ...event.message,
+        errorMessage: `${message.errorMessage} You can retry your request.`,
+      },
+    };
   });
 
   const refresh = (
