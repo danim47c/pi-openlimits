@@ -25,8 +25,12 @@ Display names include `(OpenLimits)`, for example `Claude Opus 4.8 (OpenLimits)`
 The provider metadata includes the compatibility tweaks needed for Pi/OpenLimits:
 
 - Claude/Fable use `anthropic-messages` with `interleaved-thinking-2025-05-14` and adaptive thinking.
-- GPT/Codex use `openai-responses` with `reasoningSummary: "concise"` so OpenAI Responses emits visible reasoning summary events in Pi.
+- GPT/Codex use `openai-responses` with visible reasoning summaries and deferred tool-search support.
+- GPT models expose native `off`/`xhigh`; GPT-5.6 Sol/Terra/Luna additionally expose `max`.
 - GLM/DeepSeek use `openai-completions` with chat-completions-compatible fields.
+- `/model` and `pi update --models` refresh the OpenLimits `/v1/models` catalog; the bundled catalog remains available offline.
+- Image-heavy GPT sessions are compacted automatically before their serialized request reaches OpenLimits' upstream body limit or retains more than 25 historical images. Historical image binaries and duplicate pi-goal checkpoints are omitted only from the compaction-summary request; their latest textual state and conclusions are preserved.
+- GPT-5.6 Luna, Sol, and Terra use Pi's native 372K context metadata rather than an unverified 1M declaration.
 
 ## Auth
 
@@ -34,10 +38,10 @@ The extension resolves your OpenLimits API key in this order:
 
 1. `OPENLIMITS_API_KEY`
 2. `ANTHROPIC_API_KEY` if it contains an OpenLimits key (`sk-ol-...`)
-3. `~/.pi/agent/auth.json` entries starting with `openlimits`
+3. Canonical `~/.pi/agent/auth.json` API-key credentials whose names start with `openlimits`
 4. Any `~/.pi/agent/auth.json` value starting with `sk-ol-`
 
-The key is never committed or written by this extension.
+Pi's native `/login` flow can store a separate credential for each registered provider. The extension also reuses an existing OpenLimits credential as a non-persisted fallback, and never writes keys itself.
 
 ## Install
 

@@ -11,12 +11,12 @@
 // non-openlimits provider name (e.g. "openai-codex-2", "claude-bridge") before
 // the plugin existed.
 
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 export type ResolvedKey = {
-  apiKey: string;
+  apiKey?: string;
   source:
     | "env:OPENLIMITS_API_KEY"
     | "env:ANTHROPIC_API_KEY"
@@ -27,12 +27,20 @@ export type ResolvedKey = {
 
 const OPENLIMITS_PREFIX = "sk-ol-";
 
+type ApiKeyCredential = { type?: unknown; key?: unknown };
+
 function looksLikeOpenLimitsKey(value: unknown): value is string {
   return typeof value === "string" && value.trim().startsWith(OPENLIMITS_PREFIX);
 }
 
-function loadAuthJson(): Record<string, unknown> {
-  const authPath = path.join(os.homedir(), ".pi", "agent", "auth.json");
+function credentialKey(value: unknown): string | undefined {
+  if (looksLikeOpenLimitsKey(value)) return value.trim();
+  if (typeof value !== "object" || value === null) return undefined;
+  const key = (value as ApiKeyCredential).key;
+  return looksLikeOpenLimitsKey(key) ? key.trim() : undefined;
+}
+
+function loadAuthJson(authPath: string): Record<string, unknown> {
   try {
     return JSON.parse(fs.readFileSync(authPath, "utf8"));
   } catch {
@@ -40,30 +48,37 @@ function loadAuthJson(): Record<string, unknown> {
   }
 }
 
-export function resolveKey(): ResolvedKey {
-  const envKey = process.env.OPENLIMITS_API_KEY?.trim();
+export function resolveKey(options: {
+  env?: Record<string, string | undefined>;
+  authPath?: string;
+} = {}): ResolvedKey {
+  const env = options.env ?? process.env;
+  const authPath = options.authPath ?? path.join(os.homedir(), ".pi", "agent", "auth.json");
+  const envKey = env.OPENLIMITS_API_KEY?.trim();
   if (envKey) return { apiKey: envKey, source: "env:OPENLIMITS_API_KEY" };
 
-  const anthropicKey = process.env.ANTHROPIC_API_KEY?.trim();
+  const anthropicKey = env.ANTHROPIC_API_KEY?.trim();
   if (anthropicKey && anthropicKey.startsWith(OPENLIMITS_PREFIX)) {
     return { apiKey: anthropicKey, source: "env:ANTHROPIC_API_KEY" };
   }
 
-  const data = loadAuthJson();
+  const data = loadAuthJson(authPath);
 
   // 3a. Explicit openlimits-named entries first (most specific).
   for (const [provider, value] of Object.entries(data)) {
-    if (provider.toLowerCase().startsWith("openlimits") && looksLikeOpenLimitsKey(value)) {
-      return { apiKey: value.trim(), source: "auth.json:openlimits" };
+    const key = credentialKey(value);
+    if (provider.toLowerCase().startsWith("openlimits") && key) {
+      return { apiKey: key, source: "auth.json:openlimits" };
     }
   }
 
   // 3b. Any value with the sk-ol- prefix (covers keys stored under arbitrary names).
   for (const value of Object.values(data)) {
-    if (looksLikeOpenLimitsKey(value)) {
-      return { apiKey: value.trim(), source: "auth.json:sk-ol-prefix" };
+    const key = credentialKey(value);
+    if (key) {
+      return { apiKey: key, source: "auth.json:sk-ol-prefix" };
     }
   }
 
-  return { apiKey: "missing", source: "missing" };
+  return { source: "missing" };
 }
