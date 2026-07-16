@@ -63,6 +63,10 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
   ): void => {
     if (compactingForRecovery) return;
     compactingForRecovery = true;
+    // Any automatic compaction gets one recovery continuation. If that
+    // continuation still receives the same 400, leave the error visible and
+    // stop instead of retrying or compacting again.
+    errorRecoveryAttempted = true;
     ctx.ui.notify(`${reason}; compacting automatically`, "warning");
     if (abortCurrentRequest) ctx.abort();
     ctx.compact({
