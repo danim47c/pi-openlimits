@@ -50,6 +50,14 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
   let consecutiveUpstreamRejections = 0;
   let errorRecoveryAttempted = false;
 
+  const triggerHiddenRecoveryTurn = (content: string): void => {
+    pi.sendMessage({
+      customType: "pi-openlimits-recovery",
+      content,
+      display: false,
+    }, { triggerTurn: true, deliverAs: "followUp" });
+  };
+
   pi.on("session_start", () => {
     compactingForRecovery = false;
     consecutiveUpstreamRejections = 0;
@@ -76,7 +84,7 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
         compactingForRecovery = false;
         consecutiveUpstreamRejections = 0;
         ctx.ui.notify("Automatic OpenLimits compaction completed; continuing", "info");
-        pi.sendUserMessage("Continúa desde el punto donde la compactación automática interrumpió la tarea.");
+        triggerHiddenRecoveryTurn("Resume the interrupted task after automatic OpenLimits compaction.");
       },
       onError: (error) => {
         compactingForRecovery = false;
@@ -118,7 +126,7 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
       && !errorRecoveryAttempted
       && !compactingForRecovery
     ) {
-      pi.sendUserMessage("Reintenta la solicitud anterior después del error temporal de OpenLimits.");
+      triggerHiddenRecoveryTurn("Retry the previous request after a temporary OpenLimits upstream error.");
       return;
     }
     if (

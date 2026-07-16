@@ -125,7 +125,7 @@ describe("upstream 400 recovery", () => {
     openlimitsPlugin({
       on: (event, handler) => handlers.set(event, handler),
       registerProvider: () => {},
-      sendUserMessage: (message) => sent.push(message),
+      sendMessage: (message, options) => sent.push({ message, options }),
     });
     const ctx = {
       model: { provider: "openlimits-codex" },
@@ -139,6 +139,7 @@ describe("upstream 400 recovery", () => {
     messageEnd({ message: upstreamError }, ctx);
     expect(compactions).toHaveLength(0);
     expect(sent).toHaveLength(2);
+    expect(sent.every(({ message, options }) => message.display === false && options.triggerTurn === true)).toBe(true);
     messageEnd({ message: upstreamError }, ctx);
     expect(compactions).toHaveLength(1);
 
@@ -175,7 +176,7 @@ describe("upstream 400 recovery", () => {
     openlimitsPlugin({
       on: (event, handler) => handlers.set(event, handler),
       registerProvider: () => {},
-      sendUserMessage: () => {},
+      sendMessage: () => {},
     });
     const ctx = {
       model: { provider: "openlimits-codex" },

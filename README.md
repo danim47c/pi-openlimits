@@ -29,7 +29,7 @@ The provider metadata includes the compatibility tweaks needed for Pi/OpenLimits
 - GPT models expose native `off`/`xhigh`; GPT-5.6 Sol/Terra/Luna additionally expose `max`.
 - GLM/DeepSeek use `openai-completions` with chat-completions-compatible fields.
 - `/model` and `pi update --models` refresh the OpenLimits `/v1/models` catalog; the bundled catalog remains available offline.
-- Image-heavy GPT sessions are compacted automatically before their serialized request reaches OpenLimits' upstream 50 MiB body guard. Independently, three consecutive generic upstream HTTP 400 rejections trigger one recovery compaction; if the next request still fails, recovery stops instead of looping. Historical image binaries and duplicate pi-goal checkpoints are omitted only from the compaction-summary request; their latest textual state and conclusions are preserved.
+- Image-heavy GPT sessions are compacted automatically before their serialized request reaches OpenLimits' upstream 50 MiB body guard. Independently, three consecutive generic upstream HTTP 400 rejections trigger one recovery compaction; if the next request still fails, recovery stops instead of looping. Retry and post-compaction turns are triggered with hidden recovery events rather than synthetic user messages. Historical image binaries and duplicate pi-goal checkpoints are omitted only from the compaction-summary request; their latest textual state and conclusions are preserved.
 - GPT-5.6 Luna, Sol, and Terra use Pi's native 372K context metadata rather than an unverified 1M declaration.
 
 ## Auth
