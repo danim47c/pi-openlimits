@@ -171,7 +171,7 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
     baseUrl: OPENAI_BASE,
     api: "openai-completions",
     apiKey,
-    models: CHAT_MODELS,
-    refreshModels: refresh("chat", CHAT_MODELS, "openlimits", "openai-completions", OPENAI_BASE),
+    models: [...CHAT_MODELS, ...RESPONSES_MODELS],
+    refreshModels: refresh("chat", [...CHAT_MODELS, ...RESPONSES_MODELS], "openlimits", "openai-completions", OPENAI_BASE),
   });
 }

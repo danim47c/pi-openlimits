@@ -21,7 +21,7 @@ const GPT_56_RESPONSES_TLM = {
 } as const;
 
 const CHAT_TLM = {
-  off: null, minimal: null, low: null, medium: null, high: "high", max: "max",
+  off: "none", minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max",
 } as const;
 
 const ZAI_TLM = {
