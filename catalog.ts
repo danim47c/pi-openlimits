@@ -24,6 +24,8 @@ const CHAT_TLM = {
   off: "none", minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max",
 } as const;
 
+const GPT_56_CHAT_TLM = CHAT_TLM;
+
 const ZAI_TLM = {
   off: null, minimal: null, low: "high", medium: "high", high: "high", max: "max",
 } as const;
@@ -151,6 +153,13 @@ function defaultsForLiveId(family: CatalogFamily, id: string): Omit<ProviderMode
   }
   if (id.startsWith("minimax/")) {
     return { ...FAMILY_DEFAULTS.chat, input: ["text", "image"] };
+  }
+  if (id.startsWith("openai/")) {
+    const short = id.slice("openai/".length);
+    if (short.startsWith("gpt-5.6-")) {
+      return { ...FAMILY_DEFAULTS.chat, thinkingLevelMap: GPT_56_CHAT_TLM, compat: { ...CHAT_COMPAT, thinkingFormat: undefined } };
+    }
+    return { ...FAMILY_DEFAULTS.chat, thinkingLevelMap: RESPONSES_TLM, compat: { ...CHAT_COMPAT, thinkingFormat: undefined } };
   }
   return FAMILY_DEFAULTS.chat;
 }
