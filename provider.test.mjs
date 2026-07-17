@@ -68,8 +68,8 @@ describe("provider registration", () => {
     expect(stores.get("openlimits-codex").value().models[0]).toMatchObject({
       provider: "openlimits-codex", api: "openai-responses", id: "gpt-5.6-sol",
     });
-    expect(stores.get("openlimits").value().models.map((model) => model.id)).toEqual([
-      "minimax/minimax-m3", "z-ai/glm-5.2",
+    expect([...stores.get("openlimits").value().models.map((model) => model.id)].sort()).toEqual([
+      "gpt-5.6-sol", "minimax/minimax-m3", "z-ai/glm-5.2",
     ]);
   });
 

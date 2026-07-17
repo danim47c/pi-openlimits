@@ -65,8 +65,29 @@ describe("live catalog", () => {
     expect(partitionModelIds(ids)).toEqual({
       anthropic: ["anthropic/claude-sonnet-5"],
       responses: ["openai/gpt-5.6-sol"],
-      chat: ["deepseek/deepseek-v4-pro", "minimax/minimax-future", "minimax/minimax-m3", "z-ai/glm-5.2"],
+      chat: ["deepseek/deepseek-v4-pro", "minimax/minimax-future", "minimax/minimax-m3", "openai/gpt-5.6-sol", "z-ai/glm-5.2"],
     });
+  });
+
+  test("openai/* IDs surface in the chat bucket with their static metadata", () => {
+    const live = ["openai/gpt-5.6-sol", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna", "openai/gpt-5.5", "openai/gpt-5.4", "openai/gpt-5.4-mini", "openai/gpt-5.3-codex-spark"];
+    const chat = modelsForLiveIds("chat", live);
+    const byId = Object.fromEntries(chat.map((m) => [m.id, m]));
+
+    expect(byId["gpt-5.6-sol"].contextWindow).toBe(372_000);
+    expect(byId["gpt-5.6-sol"].maxTokens).toBe(128_000);
+    expect(byId["gpt-5.6-sol"].input).toEqual(["text", "image"]);
+    expect(byId["gpt-5.6-sol"].thinkingLevelMap.max).toBe("max");
+    expect(byId["gpt-5.6-sol"].thinkingLevelMap.xhigh).toBe("xhigh");
+    expect(byId["gpt-5.6-sol"].compat.supportsReasoningEffort).toBe(true);
+
+    expect(byId["gpt-5.5"].contextWindow).toBe(1_000_000);
+    expect(byId["gpt-5.5"].thinkingLevelMap.max).toBeUndefined();
+    expect(byId["gpt-5.5"].compat.supportsReasoningEffort).toBe(true);
+
+    expect(byId["gpt-5.4"].contextWindow).toBe(1_050_000);
+    expect(byId["gpt-5.4-mini"].contextWindow).toBe(400_000);
+    expect(byId["gpt-5.3-codex-spark"].thinkingLevelMap.off).toBeNull();
   });
 
   test("preserves legacy short IDs for Claude and GPT", () => {

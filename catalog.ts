@@ -157,9 +157,56 @@ function defaultsForLiveId(family: CatalogFamily, id: string): Omit<ProviderMode
   if (id.startsWith("openai/")) {
     const short = id.slice("openai/".length);
     if (short.startsWith("gpt-5.6-")) {
-      return { ...FAMILY_DEFAULTS.chat, thinkingLevelMap: GPT_56_CHAT_TLM, compat: { ...CHAT_COMPAT, thinkingFormat: undefined } };
+      return {
+        ...FAMILY_DEFAULTS.chat,
+        input: ["text", "image"],
+        contextWindow: 372_000,
+        maxTokens: 128_000,
+        thinkingLevelMap: GPT_56_CHAT_TLM,
+        compat: { ...CHAT_COMPAT, supportsReasoningEffort: true },
+      };
     }
-    return { ...FAMILY_DEFAULTS.chat, thinkingLevelMap: RESPONSES_TLM, compat: { ...CHAT_COMPAT, thinkingFormat: undefined } };
+    if (short === "gpt-5.5") {
+      return {
+        ...FAMILY_DEFAULTS.chat,
+        input: ["text", "image"],
+        contextWindow: 1_000_000,
+        maxTokens: 128_000,
+        thinkingLevelMap: { ...RESPONSES_TLM },
+        compat: { ...CHAT_COMPAT, supportsReasoningEffort: true },
+      };
+    }
+    if (short === "gpt-5.4") {
+      return {
+        ...FAMILY_DEFAULTS.chat,
+        input: ["text", "image"],
+        contextWindow: 1_050_000,
+        maxTokens: 128_000,
+        thinkingLevelMap: { ...RESPONSES_TLM },
+        compat: { ...CHAT_COMPAT, supportsReasoningEffort: true },
+      };
+    }
+    if (short === "gpt-5.4-mini") {
+      return {
+        ...FAMILY_DEFAULTS.chat,
+        input: ["text", "image"],
+        contextWindow: 400_000,
+        maxTokens: 128_000,
+        thinkingLevelMap: { ...RESPONSES_TLM },
+        compat: { ...CHAT_COMPAT, supportsReasoningEffort: true },
+      };
+    }
+    if (short === "gpt-5.3-codex-spark") {
+      return {
+        ...FAMILY_DEFAULTS.chat,
+        input: ["text", "image"],
+        contextWindow: 128_000,
+        maxTokens: 32_000,
+        thinkingLevelMap: { ...RESPONSES_TLM, off: null },
+        compat: { ...CHAT_COMPAT, supportsReasoningEffort: true },
+      };
+    }
+    return { ...FAMILY_DEFAULTS.chat, thinkingLevelMap: RESPONSES_TLM, compat: { ...CHAT_COMPAT } };
   }
   return FAMILY_DEFAULTS.chat;
 }
@@ -169,12 +216,25 @@ export function modelsForLiveIds(family: CatalogFamily, liveIds: string[]): Prov
     ? ANTHROPIC_MODELS
     : family === "responses"
       ? RESPONSES_MODELS
-      : CHAT_MODELS;
-  const prefix = family === "anthropic" ? "anthropic/" : family === "responses" ? "openai/" : "";
+      : [...CHAT_MODELS, ...RESPONSES_MODELS];
   return liveIds.map((liveId) => {
-    const id = prefix && liveId.startsWith(prefix) ? liveId.slice(prefix.length) : liveId;
+    let id = liveId;
+    if (id.startsWith("openai/")) id = id.slice("openai/".length);
+    else if (id.startsWith("anthropic/")) id = id.slice("anthropic/".length);
     const known = staticModels.find((model) => model.id === id);
-    if (known) return known;
+    if (known) {
+      // When the chat bucket receives an openai/* ID we must rewrite the static
+      // Responses compat into the Chat Compat (no supportsToolSearch, but enable
+      // reasoning_effort since Pi's openai-completions provider reads it).
+      if (family === "chat" && liveId.startsWith("openai/")) {
+        const { compat, ...rest } = known;
+        return {
+          ...rest,
+          compat: { ...CHAT_COMPAT, supportsReasoningEffort: true },
+        };
+      }
+      return known;
+    }
     const label = id.split("/").slice(-1)[0]?.replaceAll("-", " ") ?? id;
     return {
       id,
