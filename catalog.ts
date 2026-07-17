@@ -156,6 +156,16 @@ function defaultsForLiveId(family: CatalogFamily, id: string): Omit<ProviderMode
   }
   if (id.startsWith("openai/")) {
     const short = id.slice("openai/".length);
+    // OpenAI-style completions for the GPT family: emit reasoning_effort at
+    // top level (default compat branch in pi-ai), use max_completion_tokens,
+    // and force reasoning_content replay so multi-turn thinking stays wired.
+    const gptCompat = {
+      supportsDeveloperRole: false,
+      supportsStore: false,
+      maxTokensField: "max_completion_tokens",
+      supportsReasoningEffort: true,
+      requiresReasoningContentOnAssistantMessages: true,
+    } as const;
     if (short.startsWith("gpt-5.6-")) {
       return {
         ...FAMILY_DEFAULTS.chat,
@@ -163,7 +173,7 @@ function defaultsForLiveId(family: CatalogFamily, id: string): Omit<ProviderMode
         contextWindow: 372_000,
         maxTokens: 128_000,
         thinkingLevelMap: GPT_56_CHAT_TLM,
-        compat: { ...CHAT_COMPAT, supportsReasoningEffort: true },
+        compat: gptCompat,
       };
     }
     if (short === "gpt-5.5") {
@@ -173,7 +183,7 @@ function defaultsForLiveId(family: CatalogFamily, id: string): Omit<ProviderMode
         contextWindow: 1_000_000,
         maxTokens: 128_000,
         thinkingLevelMap: { ...RESPONSES_TLM },
-        compat: { ...CHAT_COMPAT, supportsReasoningEffort: true },
+        compat: gptCompat,
       };
     }
     if (short === "gpt-5.4") {
@@ -183,7 +193,7 @@ function defaultsForLiveId(family: CatalogFamily, id: string): Omit<ProviderMode
         contextWindow: 1_050_000,
         maxTokens: 128_000,
         thinkingLevelMap: { ...RESPONSES_TLM },
-        compat: { ...CHAT_COMPAT, supportsReasoningEffort: true },
+        compat: gptCompat,
       };
     }
     if (short === "gpt-5.4-mini") {
@@ -230,7 +240,13 @@ export function modelsForLiveIds(family: CatalogFamily, liveIds: string[]): Prov
         const { compat, ...rest } = known;
         return {
           ...rest,
-          compat: { ...CHAT_COMPAT, supportsReasoningEffort: true },
+          compat: {
+            supportsDeveloperRole: false,
+            supportsStore: false,
+            maxTokensField: "max_completion_tokens",
+            supportsReasoningEffort: true,
+            requiresReasoningContentOnAssistantMessages: true,
+          },
         };
       }
       return known;
