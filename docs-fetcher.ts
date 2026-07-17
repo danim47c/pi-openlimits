@@ -20,14 +20,18 @@ export function partitionModelIds(ids: string[]): LiveCatalog {
   const cat: LiveCatalog = { anthropic: [], responses: [], chat: [] };
   for (const raw of ids) {
     const id = raw.toLowerCase();
-    if (id.startsWith("openai/")) cat.responses.push(id);
-    else if (id.startsWith("z-ai/") || id.startsWith("deepseek/") || id.startsWith("minimax/")) {
+    if (id.startsWith("openai/")) {
+      cat.responses.push(id);
+      // Mirror openai/* IDs into the chat bucket so the openlimits (openai-completions)
+      // provider surfaces them in addition to openlimits-codex (openai-responses).
+      cat.chat.push(id);
+    } else if (id.startsWith("z-ai/") || id.startsWith("deepseek/") || id.startsWith("minimax/")) {
       cat.chat.push(id);
     } else if (id.startsWith("anthropic/")) cat.anthropic.push(id);
   }
   cat.anthropic.sort();
   cat.responses.sort();
-  cat.chat.sort();
+  cat.chat = [...new Set(cat.chat)].sort();
   return cat;
 }
 
