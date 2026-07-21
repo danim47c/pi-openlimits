@@ -120,7 +120,7 @@ describe("upstream 400 recovery", () => {
     expect(isOpenLimitsUpstreamRejection({ ...upstreamError, stopReason: "stop" })).toBe(false);
   });
 
-  test("classifies 2 retries then delegates one compact-and-retry to native Pi", () => {
+  test("classifies the first qualifying 400 as overflow for native compact-and-retry", () => {
     const handlers = new Map();
     openlimitsPlugin({
       on: (event, handler) => handlers.set(event, handler),
@@ -129,15 +129,12 @@ describe("upstream 400 recovery", () => {
     const ctx = { model: { provider: "openlimits-codex" } };
     const messageEnd = handlers.get("message_end");
 
-    const first = messageEnd({ message: upstreamError }, ctx).message;
-    const second = messageEnd({ message: upstreamError }, ctx).message;
-    expect(isRetryableAssistantError(first)).toBe(true);
-    expect(isRetryableAssistantError(second)).toBe(true);
+    const classified = messageEnd({ message: upstreamError }, ctx).message;
+    expect(isContextOverflow(classified, 372_000)).toBe(true);
+    expect(isRetryableAssistantError(classified)).toBe(false);
 
-    const third = messageEnd({ message: upstreamError }, ctx).message;
-    expect(isContextOverflow(third, 372_000)).toBe(true);
-    expect(isRetryableAssistantError(third)).toBe(false);
-
+    // Native Pi removes the classified error assistant before compaction, so
+    // its retry continues from the prior tool result rather than an assistant.
     handlers.get("session_before_compact")({ reason: "overflow", willRetry: true }, ctx);
     const checkpoint = {
       role: "user",
@@ -147,17 +144,31 @@ describe("upstream 400 recovery", () => {
       payload: {
         input: [
           checkpoint,
-          { role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] },
+          {
+            type: "function_call_output",
+            call_id: "read_image",
+            output: [
+              { type: "input_text", text: "Read image" },
+              { type: "input_image", image_url: "data:image/png;base64,AA==" },
+            ],
+          },
           checkpoint,
         ],
       },
     }, ctx);
     expect(sanitized.input).toEqual([
-      { role: "user", content: [{ type: "input_text", text: "[Historical image omitted while generating an automatic compaction summary]" }] },
+      {
+        type: "function_call_output",
+        call_id: "read_image",
+        output: [
+          { type: "input_text", text: "Read image" },
+          { type: "input_text", text: "[Historical image omitted while generating an automatic compaction summary]" },
+        ],
+      },
       checkpoint,
     ]);
 
-    handlers.get("session_compact")({ reason: "overflow", willRetry: true }, ctx);
+    // A failed compact-and-retry is left visible rather than classified again.
     expect(messageEnd({ message: upstreamError }, ctx)).toBeUndefined();
   });
 
@@ -173,9 +184,7 @@ describe("upstream 400 recovery", () => {
     messageEnd({ message: upstreamError }, ctx);
     messageEnd({ message: { role: "assistant", stopReason: "stop" } }, ctx);
     const firstAfterReset = messageEnd({ message: upstreamError }, ctx).message;
-    const secondAfterReset = messageEnd({ message: upstreamError }, ctx).message;
-    expect(isRetryableAssistantError(firstAfterReset)).toBe(true);
-    expect(isRetryableAssistantError(secondAfterReset)).toBe(true);
-    expect(isContextOverflow(secondAfterReset, 372_000)).toBe(false);
+    expect(isContextOverflow(firstAfterReset, 372_000)).toBe(true);
+    expect(isRetryableAssistantError(firstAfterReset)).toBe(false);
   });
 });

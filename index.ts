@@ -27,7 +27,6 @@ import { preparePayloadForCompaction } from "./payload-guard.ts";
 
 type CatalogKey = keyof LiveCatalog;
 const CATALOG_TTL_MS = 4 * 60 * 60 * 1_000;
-const UPSTREAM_400_COMPACTION_COUNT = 3;
 
 export function isOpenLimitsUpstreamRejection(message: unknown): boolean {
   if (typeof message !== "object" || message === null) return false;
@@ -42,23 +41,16 @@ export function isOpenLimitsUpstreamRejection(message: unknown): boolean {
 export default function openlimitsPlugin(pi: ExtensionAPI): void {
   const { apiKey } = resolveKey();
   let inFlightCatalog: Promise<LiveCatalog> | undefined;
-  let consecutiveUpstreamRejections = 0;
   let errorRecoveryAttempted = false;
   let sanitizeNextCompactionRequest = false;
 
   pi.on("session_start", () => {
-    consecutiveUpstreamRejections = 0;
     errorRecoveryAttempted = false;
     sanitizeNextCompactionRequest = false;
   });
 
   pi.on("session_before_compact", (_event, ctx) => {
     if (ctx.model?.provider === "openlimits-codex") sanitizeNextCompactionRequest = true;
-  });
-
-  pi.on("session_compact", (_event, ctx) => {
-    if (ctx.model?.provider !== "openlimits-codex") return;
-    consecutiveUpstreamRejections = 0;
   });
 
   pi.on("before_provider_request", (event, ctx) => {
@@ -80,35 +72,21 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
     };
 
     if (!isOpenLimitsUpstreamRejection(message)) {
-      if (message.role === "assistant" && message.stopReason !== "error") {
-        consecutiveUpstreamRejections = 0;
-        errorRecoveryAttempted = false;
-      }
+      if (message.role === "assistant" && message.stopReason !== "error") errorRecoveryAttempted = false;
       return;
     }
 
-    // Native Pi owns retry, compaction, continuation, and the one-recovery cap.
-    // We only classify OpenLimits' otherwise-generic 400: the first two are
-    // transient retries; the third is an overflow.
+    // The generic gateway rejection is OpenLimits' context-overflow signal.
+    // Classify it on the first occurrence so Pi removes this error assistant
+    // message before compaction and continues from the preceding user/tool result.
+    // Pi owns the one-recovery cap, preventing a post-compaction loop.
     if (errorRecoveryAttempted) return;
-    consecutiveUpstreamRejections += 1;
-    const shouldCompact = consecutiveUpstreamRejections >= UPSTREAM_400_COMPACTION_COUNT;
-
-    if (shouldCompact) {
-      errorRecoveryAttempted = true;
-      return {
-        message: {
-          ...event.message,
-          errorMessage:
-            `Your input exceeds the context window of this model. OpenLimits recovery classification: ${message.errorMessage}`,
-        },
-      };
-    }
-
+    errorRecoveryAttempted = true;
     return {
       message: {
         ...event.message,
-        errorMessage: `${message.errorMessage} You can retry your request.`,
+        errorMessage:
+          `Your input exceeds the context window of this model. OpenLimits recovery classification: ${message.errorMessage}`,
       },
     };
   });
