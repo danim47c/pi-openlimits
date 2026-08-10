@@ -1,0 +1,405 @@
+{
+  "title": "OpenLimits empty/truncated assistant response evidence",
+  "capturedAt": "2026-08-03",
+  "source": "/Users/dani/.pi/agent/sessions/--Users-dani-Workspace--/2026-07-22T14-38-53-945Z_019f8a43-e7f8-7062-bed1-043243114849.jsonl",
+  "sourceType": "Pi session journal (downstream observation)",
+  "observations": [
+    {
+      "sessionLogLine": 532,
+      "timestamp": "2026-08-03T08:48:00.870Z",
+      "provider": "openlimits-claude",
+      "model": "claude-opus-4.8",
+      "role": "assistant",
+      "stopReason": "stop",
+      "contentBlockTypes": [],
+      "contentBlockCount": 0,
+      "errorMessage": null,
+      "api": "anthropic-messages",
+      "responseId": "resp_08b8a62500cb92a3016a7055bc2fe8819197f2e8b1a007286c",
+      "rawStopReason": "end_turn",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0
+      },
+      "baseUrl": "https://openlimits.app"
+    },
+    {
+      "sessionLogLine": 553,
+      "timestamp": "2026-08-03T08:59:58.922Z",
+      "provider": "openlimits-codex",
+      "model": "gpt-5.6-luna",
+      "role": "assistant",
+      "stopReason": "error",
+      "contentBlockTypes": [],
+      "contentBlockCount": 0,
+      "errorMessage": "OpenLimits devolvió 8 respuestas vacías seguidas; abortando esta vuelta para que la sesión no se quede pillada.",
+      "api": "openai-responses",
+      "responseId": null,
+      "rawStopReason": null,
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0
+      },
+      "baseUrl": "https://openlimits.app/v1"
+    },
+    {
+      "sessionLogLine": 556,
+      "timestamp": "2026-08-03T09:00:21.452Z",
+      "provider": "openlimits",
+      "model": "gpt-5.6-terra",
+      "role": "assistant",
+      "stopReason": "stop",
+      "contentBlockTypes": [],
+      "contentBlockCount": 0,
+      "errorMessage": null,
+      "api": "openai-completions",
+      "responseId": "chatcmpl-28330567416442ecbaa1a669b0f18010",
+      "rawStopReason": "stop",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0
+      },
+      "baseUrl": "https://openlimits.app/v1"
+    },
+    {
+      "sessionLogLine": 558,
+      "timestamp": "2026-08-03T09:01:09.485Z",
+      "provider": "openlimits",
+      "model": "gpt-5.6-terra",
+      "role": "assistant",
+      "stopReason": "stop",
+      "contentBlockTypes": [],
+      "contentBlockCount": 0,
+      "errorMessage": null,
+      "api": "openai-completions",
+      "responseId": "chatcmpl-ea8643a41c464c7ebb4833c60b4f8be0",
+      "rawStopReason": "stop",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0
+      },
+      "baseUrl": "https://openlimits.app/v1"
+    },
+    {
+      "sessionLogLine": 567,
+      "timestamp": "2026-08-03T09:11:30.623Z",
+      "provider": "openlimits-codex",
+      "model": "gpt-5.6-sol",
+      "role": "assistant",
+      "stopReason": "error",
+      "contentBlockTypes": [],
+      "contentBlockCount": 0,
+      "errorMessage": "OpenLimits devolvió 8 respuestas vacías seguidas; abortando esta vuelta para que la sesión no se quede pillada.",
+      "api": "openai-responses",
+      "responseId": null,
+      "rawStopReason": null,
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0
+      },
+      "baseUrl": "https://openlimits.app/v1"
+    },
+    {
+      "sessionLogLine": 571,
+      "timestamp": "2026-08-03T09:18:21.588Z",
+      "provider": "openlimits-codex",
+      "model": "gpt-5.6-sol",
+      "role": "assistant",
+      "stopReason": "error",
+      "contentBlockTypes": [],
+      "contentBlockCount": 0,
+      "errorMessage": "OpenLimits devolvió 8 respuestas vacías seguidas; abortando esta vuelta para que la sesión no se quede pillada.",
+      "api": "openai-responses",
+      "responseId": null,
+      "rawStopReason": null,
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0
+      },
+      "baseUrl": "https://openlimits.app/v1"
+    },
+    {
+      "sessionLogLine": 573,
+      "timestamp": "2026-08-03T09:21:52.118Z",
+      "provider": "openlimits-codex",
+      "model": "gpt-5.6-sol",
+      "role": "assistant",
+      "stopReason": "error",
+      "contentBlockTypes": [],
+      "contentBlockCount": 0,
+      "errorMessage": "OpenLimits devolvió 8 respuestas vacías seguidas; abortando esta vuelta para que la sesión no se quede pillada.",
+      "api": "openai-responses",
+      "responseId": null,
+      "rawStopReason": null,
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0
+      },
+      "baseUrl": "https://openlimits.app/v1"
+    },
+    {
+      "sessionLogLine": 579,
+      "timestamp": "2026-08-03T09:48:09.304Z",
+      "provider": "openlimits-codex",
+      "model": "gpt-5.6-sol",
+      "role": "assistant",
+      "stopReason": "error",
+      "contentBlockTypes": [],
+      "contentBlockCount": 0,
+      "errorMessage": "OpenLimits devolvió 8 respuestas vacías seguidas; abortando esta vuelta para que la sesión no se quede pillada.",
+      "api": "openai-responses",
+      "responseId": null,
+      "rawStopReason": null,
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0
+      },
+      "baseUrl": "https://openlimits.app/v1"
+    },
+    {
+      "sessionLogLine": 593,
+      "timestamp": "2026-08-03T10:01:26.140Z",
+      "provider": "openlimits-codex",
+      "model": "gpt-5.6-sol",
+      "role": "assistant",
+      "stopReason": "error",
+      "contentBlockTypes": [],
+      "contentBlockCount": 0,
+      "errorMessage": "OpenLimits devolvió 8 respuestas vacías seguidas; abortando esta vuelta para que la sesión no se quede pillada.",
+      "api": "openai-responses",
+      "responseId": null,
+      "rawStopReason": null,
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0
+      },
+      "baseUrl": "https://openlimits.app/v1"
+    }
+  ],
+  "interpretation": {
+    "confirmed": "Pi received assistant messages with stopReason stop/error and an empty content array; several were preceded by a toolResult in the same session.",
+    "notConfirmed": "This journal does not contain the raw HTTP request, response headers, response body, or SSE event sequence. Therefore it cannot by itself prove that OpenLimits returned an HTTP 200 with an empty body.",
+    "nextCapture": "The wrapper now writes raw-safe per-attempt metadata for future empty/truncated streams to ~/.pi/agent/openlimits-empty-responses.jsonl, including HTTP status/diagnostic headers, payload SHA-256/shape, and event types. It never writes prompt contents by default.",
+    "primarySupportCase": {
+      "timestamp": "2026-08-03T09:00:21.452Z",
+      "sessionLogLine": 556,
+      "why": "OpenAI-compatible provider produced a normal stop with responseId but zero usage and content=[]; this is the clearest downstream record of an empty successful response.",
+      "requestId": "chatcmpl-28330567416442ecbaa1a669b0f18010"
+    },
+    "toolCallStopEvidence": {
+      "toolResultLine": 592,
+      "emptyAssistantLine": 593,
+      "timestamp": "2026-08-03T10:01:26.140Z",
+      "description": "The assistant generated a tool call at line 591, received its tool result at line 592, and the next provider message at line 593 had content=[] after the wrapper exhausted eight empty attempts."
+    },
+    "rootCauseFound": [
+      "El marcador responseTransient podía quedarse pegado después de que un transporte recuperase una respuesta 2xx, provocando nuevas requests después de un done válido.",
+      "recordSuccess(sessionId) borraba los bloqueos de todas las sesiones; una recuperación correcta podía despertar y liberar sesiones ajenas prematuramente.",
+      "Un 5xx con body genérico podía no activar shouldRetry porque onResponse corre de forma asíncrona antes de que se inicializase esa variable."
+    ]
+  },
+  "privacy": "No prompt, tool arguments, API key, or full payload is included in this report.",
+  "runtimeCapture": {
+    "logPath": "/Users/dani/.pi/agent/openlimits-empty-responses.jsonl",
+    "capturedRecords": [
+      {
+        "timestamp": "2026-08-03T11:18:52.356Z",
+        "attemptId": "9fb0c153-5e87-41e3-b782-ca3842432746",
+        "sessionId": "019fc74f-7e24-7a10-adee-8e30ffbe0df0",
+        "provider": "openlimits-codex",
+        "api": "openai-responses",
+        "model": "gpt-5.6-sol",
+        "outcome": "truncated_stream",
+        "durationMs": 30498,
+        "response": {
+          "status": 200,
+          "headers": {
+            "cf-ray": "a254ebd38b3280ee-MAD",
+            "content-type": "text/event-stream"
+          }
+        },
+        "payloadSha256": "b5f7e0d0bfa5eba7076fec936fa0f663c5cdc398eaf409e848301ea50b2bcb50",
+        "eventCount": 29,
+        "lastEvent": {
+          "type": "done",
+          "reason": "length",
+          "stopReason": "length",
+          "responseId": "resp_04f5be66bf38e8ba016a7078fff68481919078a592ca533a0b",
+          "contentTypes": [
+            "thinking",
+            "thinking",
+            "thinking"
+          ]
+        }
+      },
+      {
+        "timestamp": "2026-08-03T14:11:00.287Z",
+        "attemptId": "aa9fe9bf-35e5-4a19-81a0-1e25a9b4b89d",
+        "sessionId": "019fc6c2-41c2-7b23-8039-15876b7595d7",
+        "provider": "openlimits-codex",
+        "api": "openai-responses",
+        "model": "gpt-5.6-sol",
+        "outcome": "truncated_stream",
+        "durationMs": 17118,
+        "response": {
+          "status": 200,
+          "headers": {
+            "cf-ray": "a255e84c8ec20546-MAD",
+            "content-type": "text/event-stream"
+          }
+        },
+        "payloadSha256": "39a238e4bf19b4781e31c38110507705ada05cbc44e2634e58e31c67a9c08bcc",
+        "eventCount": 13,
+        "lastEvent": {
+          "type": "done",
+          "reason": "length",
+          "stopReason": "length",
+          "responseId": "resp_03038c4c9998f1af016a70a16586fc8191a2f113b5a6fe2c8c",
+          "contentTypes": [
+            "thinking"
+          ]
+        }
+      },
+      {
+        "timestamp": "2026-08-03T14:11:17.326Z",
+        "attemptId": "601fed49-dc2e-4f26-b71a-8bf8b401299e",
+        "sessionId": "019fc6c2-41c2-7b23-8039-15876b7595d7",
+        "provider": "openlimits-codex",
+        "api": "openai-responses",
+        "model": "gpt-5.6-sol",
+        "outcome": "truncated_stream",
+        "durationMs": 12036,
+        "response": {
+          "status": 200,
+          "headers": {
+            "cf-ray": "a255e8d73a20c505-MAD",
+            "content-type": "text/event-stream"
+          }
+        },
+        "payloadSha256": "39a238e4bf19b4781e31c38110507705ada05cbc44e2634e58e31c67a9c08bcc",
+        "eventCount": 12,
+        "lastEvent": {
+          "type": "done",
+          "reason": "length",
+          "stopReason": "length",
+          "responseId": "resp_03038c4c9998f1af016a70a17b151081918b74f75d11930f16",
+          "contentTypes": [
+            "thinking"
+          ]
+        }
+      },
+      {
+        "timestamp": "2026-08-03T14:11:42.514Z",
+        "attemptId": "28fce283-79cc-4b60-ae74-ef5eb4ce359a",
+        "sessionId": "019fc6c2-41c2-7b23-8039-15876b7595d7",
+        "provider": "openlimits-codex",
+        "api": "openai-responses",
+        "model": "gpt-5.6-sol",
+        "outcome": "truncated_stream",
+        "durationMs": 20186,
+        "response": {
+          "status": 200,
+          "headers": {
+            "cf-ray": "a255e941bc1a1a81-MAD",
+            "content-type": "text/event-stream"
+          }
+        },
+        "payloadSha256": "39a238e4bf19b4781e31c38110507705ada05cbc44e2634e58e31c67a9c08bcc",
+        "eventCount": 13,
+        "lastEvent": {
+          "type": "done",
+          "reason": "length",
+          "stopReason": "length",
+          "responseId": "resp_03038c4c9998f1af016a70a18dc47c819192631ac0e3fde511",
+          "contentTypes": [
+            "thinking"
+          ]
+        }
+      },
+      {
+        "timestamp": "2026-08-03T14:12:00.492Z",
+        "attemptId": "d6f526be-74c6-4c0c-a2c1-a5dbf981051a",
+        "sessionId": "019fc6c2-41c2-7b23-8039-15876b7595d7",
+        "provider": "openlimits-codex",
+        "api": "openai-responses",
+        "model": "gpt-5.6-sol",
+        "outcome": "truncated_stream",
+        "durationMs": 12977,
+        "response": {
+          "status": 200,
+          "headers": {
+            "cf-ray": "a255e9deea49dd43-MAD",
+            "content-type": "text/event-stream"
+          }
+        },
+        "payloadSha256": "39a238e4bf19b4781e31c38110507705ada05cbc44e2634e58e31c67a9c08bcc",
+        "eventCount": 13,
+        "lastEvent": {
+          "type": "done",
+          "reason": "length",
+          "stopReason": "length",
+          "responseId": "resp_03038c4c9998f1af016a70a1a59af88191b4e58d64e9a5d284",
+          "contentTypes": [
+            "thinking"
+          ]
+        }
+      },
+      {
+        "timestamp": "2026-08-03T14:12:21.914Z",
+        "attemptId": "ff480089-09d5-438b-a5b0-3a9f8674d223",
+        "sessionId": "019fc6c2-41c2-7b23-8039-15876b7595d7",
+        "provider": "openlimits-codex",
+        "api": "openai-responses",
+        "model": "gpt-5.6-sol",
+        "outcome": "truncated_stream",
+        "durationMs": 16420,
+        "response": {
+          "status": 200,
+          "headers": {
+            "cf-ray": "a255ea4f8f3221e7-MAD",
+            "content-type": "text/event-stream"
+          }
+        },
+        "payloadSha256": "39a238e4bf19b4781e31c38110507705ada05cbc44e2634e58e31c67a9c08bcc",
+        "eventCount": 13,
+        "lastEvent": {
+          "type": "done",
+          "reason": "length",
+          "stopReason": "length",
+          "responseId": "resp_03038c4c9998f1af016a70a1b74bbc81919877915e71b73f5f",
+          "contentTypes": [
+            "thinking"
+          ]
+        }
+      }
+    ],
+    "interpretation": "Estos registros son capturas directas del wrapper: HTTP 200 y done reason=length con solo bloques thinking. No son un body HTTP vacío; son respuestas terminales sin texto ni tool call, por lo que se reintentan según la política acordada."
+  }
+}

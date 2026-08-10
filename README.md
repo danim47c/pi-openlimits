@@ -2,7 +2,7 @@
 
 Simple local Pi Coding Agent extension that registers OpenLimits models as Pi providers.
 
-It intentionally does only provider registration: no slash commands, no hooks, no doctor, no background behavior.
+It registers providers plus lightweight recovery hooks; it adds no slash commands or doctor command.
 
 ## Providers
 
@@ -27,10 +27,69 @@ The provider metadata includes the compatibility tweaks needed for Pi/OpenLimits
 - Claude/Fable use `anthropic-messages` with `interleaved-thinking-2025-05-14` and adaptive thinking.
 - GPT/Codex use `openai-responses` with visible reasoning summaries and deferred tool-search support.
 - GPT models expose native `off`/`xhigh`; GPT-5.6 Sol/Terra/Luna additionally expose `max`.
-- GLM/DeepSeek use `openai-completions` with chat-completions-compatible fields.
+- GLM/DeepSeek/GPT chat routes use `openai-completions` with chat-completions-compatible fields. On Pi 0.84,
+  `supportsFinishReason: false` lets pi-ai finish a valid response when OpenLimits closes the SSE stream
+  without a `finish_reason`; tool calls are inferred as `toolUse` and text responses as `stop`.
 - `/model` and `pi update --models` refresh the OpenLimits `/v1/models` catalog; the bundled catalog remains available offline.
-- OpenLimits' generic upstream HTTP 400 is classified for Pi's native recovery loop: the first two failures use native retry, while the third is classified as overflow so Pi natively compacts and continues. If the post-compaction retry still fails, Pi stops instead of looping. No synthetic user or hidden continuation messages are injected. Historical image binaries and duplicate pi-goal checkpoints are omitted only from the compaction-summary request; their latest textual state and conclusions are preserved.
+- OpenLimits' generic upstream HTTP 400 is classified as overflow on the first rejection so Pi's native recovery loop can compact and continue. If the post-compaction retry still fails, the rejection is left visible rather than classified again. During an overflow retry, the compaction boundary is defensively moved to the final classified context-window error so Pi does not resume from an older persisted assistant error. No synthetic user or hidden continuation messages are injected. Historical image binaries and duplicate pi-goal checkpoints are omitted only from the compaction-summary request; their latest textual state and conclusions are preserved.
+- OpenLimits HTTP 429s are retried internally up to three times and pause the affected session for 60 seconds (or a longer `Retry-After`); after the budget is exhausted a provider-shaped rate-limit error is surfaced so `pi-subagents` can select a fallback model. A file-backed circuit at `~/.pi/agent/openlimits-rate-limit-circuit.json` coordinates independent subagent processes, opens on the first 429, and permits only one half-open probe. Overloaded/5xx responses retry every 5 seconds. Waiting respects request cancellation.
+- Every observed 429 is also appended to `~/.pi/agent/openlimits-rate-limit-events.jsonl` (override with `OPENLIMITS_RATE_LIMIT_EVENTS_LOG`), including its source (`http_status` or `event_body`), parsed status/type/code/request ID when present, request/correlation headers, `Retry-After`, model/session and safe payload/event summaries. The aggregate counter remains in `~/.pi/agent/openlimits-rate-limit.json`. The OpenAI/Anthropic SDKs turn many non-2xx responses into an error event before exposing response headers; those records contain the parsed error metadata and explicitly omit headers that the SDK did not provide.
+- Content events (`text_*`, `thinking_*`, and `toolcall_*`) are forwarded to Pi as they arrive; empty protocol metadata (`start`, `text_start`, and `thinking_start`) is held until the first substantive delta so an HTTP-200 `start`/empty-`done` attempt can be retried without exposing a partial assistant message. Empty or start-only 2xx streams are retried internally every 5 seconds, up to three invalid attempts. Once content has reached Pi, a truncated/invalid stream is terminated with one diagnostic error and is never retried or combined with a second attempt, preventing duplicate/corrupt assistant messages. A thinking-only response is likewise terminal after a thinking delta/end has been emitted because it cannot be safely replaced by a later attempt. If the request is already at least 95% of the declared model window, the first invalid 2xx stream is classified as a context overflow so Pi can run its native one-shot compaction/retry; this covers OpenLimits' HTTP-200-plus-empty-`done` behavior near the limit. Each invalid attempt is appended to `~/.pi/agent/openlimits-empty-responses.jsonl` (override with `OPENLIMITS_EMPTY_RESPONSE_LOG`) with status, headers, policy, payload hash/shape, bounded event summaries and a safe context-size estimate. Diagnostic files never contain API keys, prompts, tool arguments or complete payloads.
 - GPT-5.6 Luna, Sol, and Terra use Pi's native 372K context metadata rather than an unverified 1M declaration.
+
+For persistent subagent resilience, configure at least one model from another
+provider in each role's `fallbackModels` list in `~/.pi/agent/settings.json`.
+The fallback is selected after the bounded provider retry when the error is a
+rate-limit, quota, credit, overload, or unavailable-provider failure. For
+example:
+
+```json
+{
+  "subagents": {
+    "agentOverrides": {
+      "worker": {
+        "model": "openlimits-codex/gpt-5.6-terra",
+        "fallbackModels": ["opencode/claude-fable-5", "opencode/gpt-5"]
+      }
+    }
+  }
+}
+```
+
+## Estimated token cost
+
+OpenLimits does not publish a separate tariff, so the extension now fills each
+model's `cost` metadata with the public upstream rates bundled by `pi-ai`
+(generated from the models.dev catalogue). Pi then calculates every assistant
+message in USD per million tokens using the reported `input`, `output`,
+`cacheRead`, and `cacheWrite` usage. OpenAI request-wide pricing tiers are kept
+where the catalogue provides them. The value shown by Pi is therefore an
+underlying-model estimate, not an OpenLimits charge.
+
+For a model that is not yet in models.dev, a non-zero family fallback is used
+so the footer does not silently show `$0.0000`. Set exact rates when needed with
+`OPENLIMITS_PRICING_PATH`:
+
+```json
+{
+  "gpt-future": {
+    "input": 5,
+    "output": 30,
+    "cacheRead": 0.5,
+    "cacheWrite": 0,
+    "tiers": [
+      { "inputTokensAbove": 272000, "input": 10, "output": 45, "cacheRead": 1, "cacheWrite": 0 }
+    ]
+  },
+  "_family": {
+    "chat": { "input": 1, "output": 4, "cacheRead": 0.1, "cacheWrite": 0 }
+  }
+}
+```
+
+Rates are USD per million tokens. `cacheRead` and `cacheWrite` are only
+non-zero when the upstream response reports those token categories; the
+extension does not infer cache hits from context size.
 
 ## Auth
 

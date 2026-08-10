@@ -2,6 +2,7 @@
 // Claude and Codex provider IDs intentionally omit upstream family prefixes.
 
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { loadPricingOverrides, resolveModelPricing, type PricingFamily } from "./pricing.ts";
 
 export const ANTHROPIC_BASE = "https://openlimits.app";
 export const OPENAI_BASE = "https://openlimits.app/v1";
@@ -31,12 +32,29 @@ const ZAI_TLM = {
 } as const;
 
 const RESPONSES_COMPAT = { supportsToolSearch: true } as const;
-const CHAT_COMPAT = { supportsDeveloperRole: false, supportsStore: false, maxTokensField: "max_tokens" } as const;
+// OpenLimits' Chat Completions route can close a successful SSE stream without
+// a final `finish_reason`. Pi 0.84's compat flag makes pi-ai infer `stop` or
+// `toolUse` from the assembled content instead of reporting truncation.
+type ChatCompat = NonNullable<ProviderModelConfig["compat"]> & {
+  supportsFinishReason?: boolean;
+};
+const CHAT_COMPAT: ChatCompat = {
+  supportsDeveloperRole: false,
+  supportsStore: false,
+  supportsFinishReason: false,
+  maxTokensField: "max_tokens",
+};
 const ZAI_COMPAT = { ...CHAT_COMPAT, supportsReasoningEffort: true, thinkingFormat: "zai", zaiToolStream: true } as const;
 const DEEPSEEK_COMPAT = {
   ...CHAT_COMPAT,
   supportsReasoningEffort: true,
   thinkingFormat: "deepseek",
+  requiresReasoningContentOnAssistantMessages: true,
+} as const;
+const GPT_CHAT_COMPAT = {
+  ...CHAT_COMPAT,
+  maxTokensField: "max_completion_tokens",
+  supportsReasoningEffort: true,
   requiresReasoningContentOnAssistantMessages: true,
 } as const;
 const ANTHROPIC_COMPAT = {
@@ -99,6 +117,13 @@ export const RESPONSES_MODELS = [
     thinkingLevelMap: { ...RESPONSES_TLM, off: null }, compat: { ...RESPONSES_COMPAT } },
 ] satisfies ProviderModelConfig[];
 
+// Chat Completions needs different compat from Responses for the same GPT IDs.
+// Keep this derived list as the single source for the openlimits provider.
+export const GPT_CHAT_MODELS = RESPONSES_MODELS.map((model) => ({
+  ...model,
+  compat: { ...GPT_CHAT_COMPAT },
+})) satisfies ProviderModelConfig[];
+
 export const CHAT_MODELS = [
   { id: "z-ai/glm-5.2", name: "GLM 5.2 (OpenLimits)", reasoning: true,
     input: ["text"], contextWindow: 1_000_000, maxTokens: 128_000,
@@ -125,6 +150,23 @@ export const CHAT_MODELS = [
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     thinkingLevelMap: { ...CHAT_TLM }, compat: { ...DEEPSEEK_COMPAT } },
 ] satisfies ProviderModelConfig[];
+
+export const OPENLIMITS_CHAT_MODELS = [...CHAT_MODELS, ...GPT_CHAT_MODELS] satisfies ProviderModelConfig[];
+
+// Keep all static models priced as soon as the extension is loaded. This is
+// what pi-ai's calculateCost(model, usage) reads when it finalizes a stream.
+// The override file is optional; models.dev-derived rates remain the default.
+const PRICING_OVERRIDES = loadPricingOverrides();
+function attachPricing(models: ProviderModelConfig[], family: PricingFamily): void {
+  for (const model of models) {
+    model.cost = resolveModelPricing(model.id, family, PRICING_OVERRIDES);
+  }
+}
+
+attachPricing(ANTHROPIC_MODELS, "anthropic");
+attachPricing(RESPONSES_MODELS, "responses");
+attachPricing(CHAT_MODELS, "chat");
+attachPricing(GPT_CHAT_MODELS, "chat");
 
 type CatalogFamily = "anthropic" | "responses" | "chat";
 
@@ -159,13 +201,6 @@ function defaultsForLiveId(family: CatalogFamily, id: string): Omit<ProviderMode
     // OpenAI-style completions for the GPT family: emit reasoning_effort at
     // top level (default compat branch in pi-ai), use max_completion_tokens,
     // and force reasoning_content replay so multi-turn thinking stays wired.
-    const gptCompat = {
-      supportsDeveloperRole: false,
-      supportsStore: false,
-      maxTokensField: "max_completion_tokens",
-      supportsReasoningEffort: true,
-      requiresReasoningContentOnAssistantMessages: true,
-    } as const;
     if (short.startsWith("gpt-5.6-")) {
       return {
         ...FAMILY_DEFAULTS.chat,
@@ -173,7 +208,7 @@ function defaultsForLiveId(family: CatalogFamily, id: string): Omit<ProviderMode
         contextWindow: 372_000,
         maxTokens: 128_000,
         thinkingLevelMap: GPT_56_CHAT_TLM,
-        compat: gptCompat,
+        compat: GPT_CHAT_COMPAT,
       };
     }
     if (short === "gpt-5.5") {
@@ -183,7 +218,7 @@ function defaultsForLiveId(family: CatalogFamily, id: string): Omit<ProviderMode
         contextWindow: 1_000_000,
         maxTokens: 128_000,
         thinkingLevelMap: { ...RESPONSES_TLM },
-        compat: gptCompat,
+        compat: GPT_CHAT_COMPAT,
       };
     }
     if (short === "gpt-5.4") {
@@ -193,7 +228,7 @@ function defaultsForLiveId(family: CatalogFamily, id: string): Omit<ProviderMode
         contextWindow: 1_050_000,
         maxTokens: 128_000,
         thinkingLevelMap: { ...RESPONSES_TLM },
-        compat: gptCompat,
+        compat: GPT_CHAT_COMPAT,
       };
     }
     if (short === "gpt-5.4-mini") {
@@ -203,7 +238,7 @@ function defaultsForLiveId(family: CatalogFamily, id: string): Omit<ProviderMode
         contextWindow: 400_000,
         maxTokens: 128_000,
         thinkingLevelMap: { ...RESPONSES_TLM },
-        compat: { ...CHAT_COMPAT, supportsReasoningEffort: true },
+        compat: GPT_CHAT_COMPAT,
       };
     }
     if (short === "gpt-5.3-codex-spark") {
@@ -213,10 +248,10 @@ function defaultsForLiveId(family: CatalogFamily, id: string): Omit<ProviderMode
         contextWindow: 128_000,
         maxTokens: 32_000,
         thinkingLevelMap: { ...RESPONSES_TLM, off: null },
-        compat: { ...CHAT_COMPAT, supportsReasoningEffort: true },
+        compat: GPT_CHAT_COMPAT,
       };
     }
-    return { ...FAMILY_DEFAULTS.chat, thinkingLevelMap: RESPONSES_TLM, compat: { ...CHAT_COMPAT } };
+    return { ...FAMILY_DEFAULTS.chat, thinkingLevelMap: RESPONSES_TLM, compat: GPT_CHAT_COMPAT };
   }
   return FAMILY_DEFAULTS.chat;
 }
@@ -226,37 +261,20 @@ export function modelsForLiveIds(family: CatalogFamily, liveIds: string[]): Prov
     ? ANTHROPIC_MODELS
     : family === "responses"
       ? RESPONSES_MODELS
-      : [...CHAT_MODELS, ...RESPONSES_MODELS];
+      : OPENLIMITS_CHAT_MODELS;
+  const pricingOverrides = loadPricingOverrides();
   return liveIds.map((liveId) => {
     let id = liveId;
     if (id.startsWith("openai/")) id = id.slice("openai/".length);
     else if (id.startsWith("anthropic/")) id = id.slice("anthropic/".length);
     const known = staticModels.find((model) => model.id === id);
-    if (known) {
-      // When the chat bucket receives an openai/* ID we must rewrite the static
-      // Responses compat into the Chat Compat (no supportsToolSearch, but enable
-      // reasoning_effort since Pi's openai-completions provider reads it).
-      if (family === "chat" && liveId.startsWith("openai/")) {
-        const { compat, ...rest } = known;
-        return {
-          ...rest,
-          compat: {
-            supportsDeveloperRole: false,
-            supportsStore: false,
-            maxTokensField: "max_completion_tokens",
-            supportsReasoningEffort: true,
-            requiresReasoningContentOnAssistantMessages: true,
-          },
-        };
-      }
-      return known;
-    }
+    if (known) return { ...known, cost: resolveModelPricing(liveId, family, pricingOverrides) };
     const label = id.split("/").slice(-1)[0]?.replaceAll("-", " ") ?? id;
     return {
       id,
       name: `${label.replace(/\b\w/g, (char) => char.toUpperCase())} (OpenLimits)`,
       ...defaultsForLiveId(family, id),
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      cost: resolveModelPricing(liveId, family, pricingOverrides),
     };
   });
 }

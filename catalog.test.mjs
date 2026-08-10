@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { ANTHROPIC_MODELS, CHAT_MODELS, RESPONSES_MODELS, modelsForLiveIds } from "./catalog.ts";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
+import { ANTHROPIC_MODELS, CHAT_MODELS, GPT_CHAT_MODELS, RESPONSES_MODELS, modelsForLiveIds } from "./catalog.ts";
 import { partitionModelIds } from "./docs-fetcher.ts";
 
 describe("OpenAI Responses reasoning levels", () => {
@@ -38,6 +39,55 @@ describe("catalog compatibility", () => {
       expect(model.thinkingLevelMap.max).toBe("max");
       expect(model.compat?.forceAdaptiveThinking).toBe(true);
     }
+  });
+
+  test("GPT Chat Completions models emit OpenAI reasoning effort", () => {
+    for (const model of GPT_CHAT_MODELS) {
+      expect(model.compat).toMatchObject({
+        maxTokensField: "max_completion_tokens",
+        supportsReasoningEffort: true,
+        requiresReasoningContentOnAssistantMessages: true,
+      });
+    }
+    expect(GPT_CHAT_MODELS.find((model) => model.id === "gpt-5.6-sol")?.thinkingLevelMap.max).toBe("max");
+  });
+
+  test("Chat Completions tolerate streams without finish_reason on Pi 0.84", () => {
+    expect(CHAT_MODELS.find((model) => model.id === "z-ai/glm-5.2")?.compat).toMatchObject({
+      supportsFinishReason: false,
+    });
+    expect(GPT_CHAT_MODELS.find((model) => model.id === "gpt-5.6-sol")?.compat).toMatchObject({
+      supportsFinishReason: false,
+    });
+  });
+
+  test("serializes max thinking as reasoning_effort for GPT Chat Completions", async () => {
+    const originalFetch = globalThis.fetch;
+    let payload;
+    globalThis.fetch = async (_url, init) => {
+      payload = JSON.parse(init.body);
+      return new Response("data: [DONE]\\n\\n", {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    };
+    try {
+      const model = {
+        ...GPT_CHAT_MODELS.find((candidate) => candidate.id === "gpt-5.6-sol"),
+        api: "openai-completions",
+        provider: "openlimits",
+        baseUrl: "https://example.test/v1",
+      };
+      for await (const _event of openAICompletionsApi().streamSimple(
+        model,
+        { messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+        { apiKey: "test", reasoning: "max" },
+      )) {}
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(payload.reasoning_effort).toBe("max");
   });
 
   test("chat families carry explicit replay/stream formats", () => {

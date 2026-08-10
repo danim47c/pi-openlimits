@@ -6,7 +6,7 @@
   "main": "index.ts",
   "private": true,
   "scripts": {
-    "test": "bun test catalog.test.mjs auth.test.mjs provider.test.mjs payload-guard.test.mjs"
+    "test": "bun test catalog.test.mjs pricing.test.mjs auth.test.mjs provider.test.mjs payload-guard.test.mjs rate-limit.test.mjs stream-recovery.test.mjs transient-recovery.test.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.80.8"
