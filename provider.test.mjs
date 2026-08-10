@@ -251,6 +251,8 @@ describe("upstream 400 recovery", () => {
     expect(isContextOverflow(first, 372_000)).toBe(true);
     expect(isRetryableAssistantError(first)).toBe(false);
 
+    // Native Pi removes the classified error assistant before compaction, so
+    // its retry continues from the prior tool result rather than an assistant.
     handlers.get("session_before_compact")({ reason: "overflow", willRetry: true }, ctx);
     const checkpoint = {
       role: "user",
@@ -260,16 +262,31 @@ describe("upstream 400 recovery", () => {
       payload: {
         input: [
           checkpoint,
-          { role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] },
+          {
+            type: "function_call_output",
+            call_id: "read_image",
+            output: [
+              { type: "input_text", text: "Read image" },
+              { type: "input_image", image_url: "data:image/png;base64,AA==" },
+            ],
+          },
           checkpoint,
         ],
       },
     }, ctx);
     expect(sanitized.input).toEqual([
-      { role: "user", content: [{ type: "input_text", text: "[Historical image omitted while generating an automatic compaction summary]" }] },
+      {
+        type: "function_call_output",
+        call_id: "read_image",
+        output: [
+          { type: "input_text", text: "Read image" },
+          { type: "input_text", text: "[Historical image omitted while generating an automatic compaction summary]" },
+        ],
+      },
       checkpoint,
     ]);
 
+    // A failed compact-and-retry is left visible rather than classified again.
     expect(messageEnd({ message: upstreamError }, ctx)).toBeUndefined();
   });
 

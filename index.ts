@@ -1179,7 +1179,6 @@ function isAssistantContentEvent(event: unknown): boolean {
 
 type CatalogKey = keyof LiveCatalog;
 const CATALOG_TTL_MS = 4 * 60 * 60 * 1_000;
-
 // Pi 0.84 replaced the provider-scoped context.store accessor with an
 // immutable `stored` snapshot and generation-checked `publish()`. Keep the
 // structural compatibility type local so this extension can still be loaded
@@ -1208,7 +1207,6 @@ type RefreshContextCompat = {
 function isOpenLimitsProvider(provider: unknown): provider is string {
 	return typeof provider === "string" && provider.startsWith("openlimits");
 }
-
 export function isOpenLimitsUpstreamRejection(message: unknown): boolean {
 	if (typeof message !== "object" || message === null) return false;
 	const candidate = message as {
