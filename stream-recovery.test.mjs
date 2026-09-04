@@ -488,7 +488,50 @@ test("turns a near-window empty 2xx stream into one native overflow recovery", a
 	});
 });
 
-test("forwards thinking events and terminates a thinking-only response without retrying", async () => {
+test("retries a near-window truncation after content before handing off to overflow recovery", async () => {
+	let requests = 0;
+	const api = () => ({
+		streamSimple(_model, _context, options) {
+			const attempt = requests++;
+			return (async function* () {
+				await options.onResponse?.({ status: 200, headers: {} }, model);
+				if (attempt === 0) {
+					const partial = { role: "assistant", content: [] };
+					yield { type: "start", partial };
+					yield { type: "text_delta", contentIndex: 0, delta: "partial", partial };
+					return;
+				}
+				yield* successEvents();
+			})();
+		},
+	});
+	const highContextModel = { ...model, contextWindow: 100 };
+	const highContext = {
+		messages: [{
+			role: "assistant",
+			content: [{ type: "text", text: "previous" }],
+			usage: {
+				input: 95,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 95,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+		}],
+	};
+	const events = await collect(rateLimitedStream(api, immediateLimiter(), undefined, {
+		maxAttempts: 2,
+		retryDelayMs: 0,
+	})(highContextModel, highContext));
+
+	expect(requests).toBe(2);
+	expect(events.map((event) => event.type)).toEqual(["start", "text_delta", "done"]);
+	expect(events.at(-1)).toMatchObject({ type: "done" });
+});
+
+test("retries a thinking-only response without exposing partial events", async () => {
 	let requests = 0;
 	const api = () => ({
 		streamSimple() {
@@ -502,12 +545,15 @@ test("forwards thinking events and terminates a thinking-only response without r
 			})();
 		},
 	});
-	const events = await collect(rateLimitedStream(api, immediateLimiter())(model, context));
+	const events = await collect(rateLimitedStream(api, immediateLimiter(), undefined, {
+		maxAttempts: 3,
+		retryDelayMs: 0,
+	})(model, context));
 
-	expect(requests).toBe(1);
-	expect(events.map((event) => event.type)).toEqual(["start", "thinking_start", "thinking_delta", "error"]);
+	expect(requests).toBe(3);
+	expect(events).toHaveLength(1);
 	expect(events.at(-1)).toMatchObject({ type: "error", reason: "error" });
-	expect(events.at(-1).error.errorMessage).toContain("refusing to retry");
+	expect(events.at(-1).error.errorMessage).toContain("response validation budget exhausted");
 });
 
 test("retries an invalid stream before a later response succeeds", async () => {
@@ -539,7 +585,7 @@ test("retries an invalid stream before a later response succeeds", async () => {
 	expect(events.at(-1)).toMatchObject({ type: "done" });
 });
 
-test("forwards content events before the provider emits done", async () => {
+test("buffers content events until the provider emits done", async () => {
 	let doneYielded = false;
 	const api = () => ({
 		streamSimple() {
@@ -559,16 +605,20 @@ test("forwards content events before the provider emits done", async () => {
 		},
 	});
 	const iterator = rateLimitedStream(api, immediateLimiter())(model, context)[Symbol.asyncIterator]();
-	const first = await iterator.next();
-	const second = await iterator.next();
+	const firstPending = iterator.next();
+	await Bun.sleep(5);
 
 	expect(doneYielded).toBe(false);
+	const first = await firstPending;
+	const second = await iterator.next();
+
+	expect(doneYielded).toBe(true);
 	expect(first.value.type).toBe("start");
 	expect(second.value).toMatchObject({ type: "text_delta", delta: "early" });
 	await iterator.return?.();
 });
 
-test("forwards thinking start, delta, and end events progressively", async () => {
+test("forwards thinking start, delta, and end events for a valid response", async () => {
 	const partial = { role: "assistant", content: [{ type: "thinking", thinking: "internal" }] };
 	const api = () => ({
 		streamSimple() {
@@ -686,7 +736,36 @@ test("retries empty thinking markers without exposing partial events", async () 
 	expect(events.map((event) => event.type)).toEqual(["start", "text_delta", "done"]);
 });
 
-test("does not retry after content is emitted when a 2xx stream truncates", async () => {
+test("retries a 2xx stream truncated after content without duplicating partial output", async () => {
+	let attempts = 0;
+	const api = () => ({
+		streamSimple(_model, _context, options) {
+			const attempt = attempts++;
+			return (async function* () {
+				await options.onResponse?.({ status: 200, headers: {} }, model);
+				if (attempt === 0) {
+					const partial = { role: "assistant", content: [] };
+					yield { type: "start", partial };
+					yield { type: "text_delta", contentIndex: 0, delta: "partial", partial };
+					// No terminal done: the provider closes the HTTP stream prematurely.
+					return;
+				}
+				yield* successEvents();
+			})();
+		},
+	});
+	const events = await collect(rateLimitedStream(api, immediateLimiter(), undefined, {
+		maxAttempts: 3,
+		retryDelayMs: 0,
+	})(model, context));
+
+	expect(attempts).toBe(2);
+	expect(events.map((event) => event.type)).toEqual(["start", "text_delta", "done"]);
+	expect(events.at(1)).toMatchObject({ type: "text_delta", delta: "recovered" });
+	expect(events.some((event) => event.delta === "partial")).toBe(false);
+});
+
+test("exhausts truncated streams after content without forwarding partial output", async () => {
 	let attempts = 0;
 	const api = () => ({
 		streamSimple(_model, _context, options) {
@@ -696,7 +775,76 @@ test("does not retry after content is emitted when a 2xx stream truncates", asyn
 				const partial = { role: "assistant", content: [] };
 				yield { type: "start", partial };
 				yield { type: "text_delta", contentIndex: 0, delta: "partial", partial };
-				// No terminal done: the provider closes the HTTP stream prematurely.
+			})();
+		},
+	});
+	const events = await collect(rateLimitedStream(api, immediateLimiter(), undefined, {
+		maxAttempts: 2,
+		retryDelayMs: 0,
+	})(model, context));
+
+	expect(attempts).toBe(2);
+	expect(events).toHaveLength(1);
+	expect(events[0]).toMatchObject({ type: "error", reason: "error" });
+	expect(events[0].error.errorMessage).toContain("response validation budget exhausted");
+	expect(JSON.stringify(events)).not.toContain("partial");
+});
+
+test("does not retry or diagnose a truncation when cancellation wins during retry delay", async () => {
+	const controller = new AbortController();
+	let attempts = 0;
+	const api = () => ({
+		streamSimple(_model, _context, options) {
+			attempts += 1;
+			return (async function* () {
+				await options.onResponse?.({ status: 200, headers: {} }, model);
+				const partial = { role: "assistant", content: [] };
+				yield { type: "start", partial };
+				yield { type: "text_delta", contentIndex: 0, delta: "partial", partial };
+			})();
+		},
+	});
+	const sessionId = `abort-during-truncation-${diagnosticNonce}`;
+	const pending = collect(rateLimitedStream(api, immediateLimiter(), undefined, {
+		maxAttempts: 3,
+		retryDelayMs: 50,
+	})(model, context, { signal: controller.signal, sessionId }));
+	setTimeout(() => controller.abort(), 10);
+	const events = await pending;
+
+	expect(attempts).toBe(1);
+	expect(events).toHaveLength(1);
+	expect(events[0]).toMatchObject({
+		type: "error",
+		reason: "aborted",
+		error: { stopReason: "aborted" },
+	});
+	expect(events[0].error.errorMessage).not.toContain("truncated");
+	expect(JSON.stringify(events)).not.toContain("response validation");
+	await Bun.sleep(10);
+	const records = await diagnosticLines(testDiagnosticsPath, 0);
+	expect(records.filter((entry) => entry.sessionId === sessionId)).toHaveLength(0);
+});
+
+test("treats an abort-shaped premature stream error as cancellation", async () => {
+	let attempts = 0;
+	const api = () => ({
+		streamSimple(_model, _context, _options) {
+			attempts += 1;
+			return (async function* () {
+				await _options.onResponse?.({ status: 200, headers: {} }, model);
+				const partial = { role: "assistant", content: [] };
+				yield { type: "start", partial };
+				yield { type: "text_delta", contentIndex: 0, delta: "partial", partial };
+				yield {
+					type: "error",
+					reason: "aborted",
+					error: {
+						role: "assistant",
+						stopReason: "aborted",
+						errorMessage: "Request was aborted",
+					},
+				};
 			})();
 		},
 	});
@@ -706,8 +854,42 @@ test("does not retry after content is emitted when a 2xx stream truncates", asyn
 	})(model, context));
 
 	expect(attempts).toBe(1);
-	expect(events.map((event) => event.type)).toEqual(["start", "text_delta", "error"]);
-	expect(events.at(-1).error.errorMessage).toContain("truncated after content was delivered");
+	expect(events).toHaveLength(1);
+	expect(events[0]).toMatchObject({
+		type: "error",
+		reason: "aborted",
+		error: { stopReason: "aborted" },
+	});
+	expect(events[0].error.errorMessage).not.toContain("truncated");
+});
+
+test("treats an AbortError thrown by the inner stream as cancellation", async () => {
+	let attempts = 0;
+	const api = () => ({
+		streamSimple(_model, _context, options) {
+			attempts += 1;
+			return (async function* () {
+				await options.onResponse?.({ status: 200, headers: {} }, model);
+				const partial = { role: "assistant", content: [] };
+				yield { type: "start", partial };
+				yield { type: "text_delta", contentIndex: 0, delta: "partial", partial };
+				throw new DOMException("The operation was aborted.", "AbortError");
+			})();
+		},
+	});
+	const events = await collect(rateLimitedStream(api, immediateLimiter(), undefined, {
+		maxAttempts: 3,
+		retryDelayMs: 0,
+	})(model, context));
+
+	expect(attempts).toBe(1);
+	expect(events).toHaveLength(1);
+	expect(events[0]).toMatchObject({
+		type: "error",
+		reason: "aborted",
+		error: { stopReason: "aborted" },
+	});
+	expect(events[0].error.errorMessage).not.toContain("truncated");
 });
 
 test("exhausts empty HTTP 2xx streams without forwarding partial events or looping", async () => {
