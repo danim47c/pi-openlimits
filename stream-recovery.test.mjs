@@ -445,11 +445,11 @@ test("turns a near-window empty 2xx stream into one native overflow recovery", a
 				provider: model.provider,
 				model: model.id,
 				usage: {
-					input: 90,
+					input: 92,
 					output: 0,
 					cacheRead: 0,
 					cacheWrite: 0,
-					totalTokens: 90,
+					totalTokens: 92,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				},
 				stopReason: "stop",
@@ -459,7 +459,7 @@ test("turns a near-window empty 2xx stream into one native overflow recovery", a
 				role: "toolResult",
 				toolCallId: "tool-1",
 				toolName: "read",
-				content: [{ type: "text", text: "x".repeat(40) }],
+				content: [{ type: "text", text: "x".repeat(8) }],
 				isError: false,
 				timestamp: 2,
 			},
@@ -483,7 +483,7 @@ test("turns a near-window empty 2xx stream into one native overflow recovery", a
 	expect(record).toMatchObject({
 		likelyContextOverflow: true,
 		contextWindow: 100,
-		estimatedContextTokens: 100,
+		estimatedContextTokens: 94,
 		response: { status: 200, headers: { "cf-ray": "ray-overflow-1" } },
 	});
 });

@@ -64,6 +64,10 @@ const ANTHROPIC_COMPAT = {
 } as const;
 
 export const ANTHROPIC_MODELS = [
+  { id: "claude-opus-5", name: "Claude Opus 5 (OpenLimits)", reasoning: true,
+    input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 128_000,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    thinkingLevelMap: { ...ANTHROPIC_TLM }, compat: { ...ANTHROPIC_COMPAT, supportsTemperature: false } },
   { id: "claude-opus-4.8", name: "Claude Opus 4.8 (OpenLimits)", reasoning: true,
     input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 128_000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

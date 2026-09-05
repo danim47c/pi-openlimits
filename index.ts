@@ -85,8 +85,11 @@ export const TRANSIENT_MAX_ATTEMPTS = 3;
  * an empty `done` event instead of returning a context-window error. Once the
  * local estimate is this close to the declared window, another retry cannot
  * make the request smaller; surface an overflow error so Pi can compact once.
+ * OpenLimits GPT/Opus routes can expose a smaller input ceiling than their
+ * published total window, so use a 90% guard to hand silent overflows to Pi
+ * before the provider exhausts its invalid-response retry budget.
  */
-export const EMPTY_RESPONSE_CONTEXT_OVERFLOW_THRESHOLD = 0.95;
+export const EMPTY_RESPONSE_CONTEXT_OVERFLOW_THRESHOLD = 0.9;
 const DEFAULT_EMPTY_RESPONSE_LOG = join(
 	homedir(),
 	".pi",

@@ -41,6 +41,13 @@ describe("catalog compatibility", () => {
     }
   });
 
+  test("Claude Opus 5 exposes the documented 1M context", () => {
+    expect(ANTHROPIC_MODELS.find((model) => model.id === "claude-opus-5")).toMatchObject({
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    });
+  });
+
   test("GPT Chat Completions models emit OpenAI reasoning effort", () => {
     for (const model of GPT_CHAT_MODELS) {
       expect(model.compat).toMatchObject({
@@ -144,6 +151,15 @@ describe("live catalog", () => {
     expect(modelsForLiveIds("anthropic", [ids[0]])[0].id).toBe("claude-sonnet-5");
     expect(modelsForLiveIds("responses", [ids[1]])[0].id).toBe("gpt-5.6-sol");
     expect(modelsForLiveIds("chat", [ids[3]])[0].id).toBe("minimax/minimax-m3");
+  });
+
+  test("uses long-context metadata for live Claude Opus 5", () => {
+    const model = modelsForLiveIds("anthropic", ["anthropic/claude-opus-5"])[0];
+    expect(model).toMatchObject({
+      id: "claude-opus-5",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    });
   });
 
   test("creates conservative metadata for future models", () => {
