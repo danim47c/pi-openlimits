@@ -177,7 +177,7 @@ describe("provider registration", () => {
         reasoning: true,
         input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 372_000,
+        contextWindow: 1_050_000,
         maxTokens: 128_000,
         compat: { supportsToolSearch: true },
       }],

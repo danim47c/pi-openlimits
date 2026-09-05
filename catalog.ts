@@ -86,17 +86,20 @@ export const ANTHROPIC_MODELS = [
     thinkingLevelMap: { ...ANTHROPIC_TLM }, compat: { ...ANTHROPIC_COMPAT } },
 ] satisfies ProviderModelConfig[];
 
+// OpenLimits accepts approximately 920K input tokens for GPT-5.6 and
+// rejects requests above the documented 922K input ceiling. With the 128K
+// output budget, that is the published 1.05M total context window.
 export const RESPONSES_MODELS = [
   { id: "gpt-5.6-sol", name: "GPT-5.6 Sol (OpenLimits)", reasoning: true,
-    input: ["text", "image"], contextWindow: 372_000, maxTokens: 128_000,
+    input: ["text", "image"], contextWindow: 1_050_000, maxTokens: 128_000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     thinkingLevelMap: { ...GPT_56_RESPONSES_TLM }, compat: { ...RESPONSES_COMPAT } },
   { id: "gpt-5.6-terra", name: "GPT-5.6 Terra (OpenLimits)", reasoning: true,
-    input: ["text", "image"], contextWindow: 372_000, maxTokens: 128_000,
+    input: ["text", "image"], contextWindow: 1_050_000, maxTokens: 128_000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     thinkingLevelMap: { ...GPT_56_RESPONSES_TLM }, compat: { ...RESPONSES_COMPAT } },
   { id: "gpt-5.6-luna", name: "GPT-5.6 Luna (OpenLimits)", reasoning: true,
-    input: ["text", "image"], contextWindow: 372_000, maxTokens: 128_000,
+    input: ["text", "image"], contextWindow: 1_050_000, maxTokens: 128_000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     thinkingLevelMap: { ...GPT_56_RESPONSES_TLM }, compat: { ...RESPONSES_COMPAT } },
   { id: "gpt-5.5", name: "GPT-5.5 (OpenLimits)", reasoning: true,

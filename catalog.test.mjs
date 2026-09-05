@@ -10,7 +10,7 @@ describe("OpenAI Responses reasoning levels", () => {
       const model = RESPONSES_MODELS.find((candidate) => candidate.id === id);
 
       expect(model).toBeDefined();
-      expect(model?.contextWindow).toBe(372_000);
+      expect(model?.contextWindow).toBe(1_050_000);
       expect(model?.thinkingLevelMap).toMatchObject({
         off: "none",
         minimal: "low",
@@ -124,7 +124,7 @@ describe("live catalog", () => {
     const chat = modelsForLiveIds("chat", live);
     const byId = Object.fromEntries(chat.map((m) => [m.id, m]));
 
-    expect(byId["gpt-5.6-sol"].contextWindow).toBe(372_000);
+    expect(byId["gpt-5.6-sol"].contextWindow).toBe(1_050_000);
     expect(byId["gpt-5.6-sol"].maxTokens).toBe(128_000);
     expect(byId["gpt-5.6-sol"].input).toEqual(["text", "image"]);
     expect(byId["gpt-5.6-sol"].thinkingLevelMap.max).toBe("max");
