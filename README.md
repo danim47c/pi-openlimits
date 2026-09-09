@@ -103,6 +103,27 @@ The extension resolves your OpenLimits API key in this order:
 
 Pi's native `/login` flow can store a separate credential for each registered provider. The extension also reuses an existing OpenLimits credential as a non-persisted fallback, and never writes keys itself.
 
+## Subagent latency and observability
+
+OpenLimits can be quiet for several minutes while a large `thinking: max`
+request is still being computed. The stream wrapper buffers each attempt's real
+content until a valid terminal `done`, so a truncated response can be retried
+without duplicating assistant content. For normal Pi requests, which carry a
+`sessionId`, the wrapper emits a no-op `thinking_delta` heartbeat every 30
+seconds while that content is buffered. The heartbeat advances
+`message_update`/Watchdog activity but adds no text, tool call, or persisted
+assistant content. Direct callers that omit `sessionId` retain the silent
+stream behaviour.
+
+For workers using this provider, prefer a task-specific prompt and configure a
+run-level timeout of at least **20 minutes for writers** and **10 minutes for
+reviewers**. Do not add a retry or a hard tool budget merely to compensate for
+this latency. A `needs_attention` signal should be treated as a control signal:
+inspect the exact run status and steer the existing child before relaunching it.
+Use a stable `sessionId` so rate-limit and empty-stream evidence can be
+correlated per worker. See [`AGENTS.md`](./AGENTS.md) for the complete stream,
+cancellation, recovery, and diagnostic-log contract.
+
 ## Install
 
 Clone or copy this repo into your Pi extensions directory, for example:

@@ -45,8 +45,18 @@ export class OpenLimitsTransientRecovery {
 	private readonly transientFailures = new Map<string, RateLimitFailure>();
 	private legacyFailures: RateLimitFailure[] = [];
 	private logLoaded?: Promise<void>;
-	private readonly recoveryPath = join(homedir(), ".pi", "agent", "openlimits-recovered");
-	private readonly rateLimitLogPath = join(homedir(), ".pi", "agent", "openlimits-rate-limit.json");
+	private readonly recoveryPath = join(
+		homedir(),
+		".pi",
+		"agent",
+		"openlimits-recovered",
+	);
+	private readonly rateLimitLogPath = join(
+		homedir(),
+		".pi",
+		"agent",
+		"openlimits-rate-limit.json",
+	);
 	private readonly sharedLimiter?: OpenLimitsRateLimiter;
 	private readonly sharedLeases = new Map<string, RateLimitLease>();
 	private sharedUpdate: Promise<void> = Promise.resolve();
@@ -56,6 +66,12 @@ export class OpenLimitsTransientRecovery {
 	}
 
 	async wait(sessionId: string, signal?: AbortSignal): Promise<void> {
+		// Honour the caller's `AbortSignal` in two places: the inner poll loop
+		// below registers an `abort` listener that rejects the wait promise,
+		// and `sharedLimiter.acquire(signal)` also forwards cancellation. The
+		// outer retry loop re-checks `signal?.aborted` between polls so an
+		// abort that fires exactly between iterations still surfaces before
+		// the next attempt is dispatched.
 		if (this.sharedLimiter) {
 			// recordFailure/recordSuccess are intentionally synchronous at this
 			// layer so the provider stream cannot be blocked on diagnostics. Flush
@@ -68,7 +84,10 @@ export class OpenLimitsTransientRecovery {
 			const state = this.sessions.get(sessionId);
 			if (!state) return;
 			const recoverySignalAt = await this.recoverySignalMtime();
-			if (recoverySignalAt !== undefined && recoverySignalAt > (state.recoverySignalAt ?? state.blockedAt)) {
+			if (
+				recoverySignalAt !== undefined &&
+				recoverySignalAt > (state.recoverySignalAt ?? state.blockedAt)
+			) {
 				// A recovery marker is only a permission to probe this session. Keep
 				// its circuit until the probe itself succeeds, and remember the marker
 				// so the same signal cannot trigger an unbounded request loop.
@@ -87,7 +106,8 @@ export class OpenLimitsTransientRecovery {
 					clearTimeout(timer);
 					unregister();
 					signal?.removeEventListener("abort", onAbort);
-					if (error) reject(error); else resolve();
+					if (error) reject(error);
+					else resolve();
 				};
 				const timer = setTimeout(finish, Math.min(remaining, 1_000));
 				const onAbort = () => finish(abortError());
@@ -97,12 +117,22 @@ export class OpenLimitsTransientRecovery {
 		}
 	}
 
-	recordFailure(sessionId: string, kind: TransientKind, retryAfterMs?: number, sample?: string): void {
+	recordFailure(
+		sessionId: string,
+		kind: TransientKind,
+		retryAfterMs?: number,
+		sample?: string,
+	): void {
 		const now = Date.now();
-		const wait = kind === "rate_limit"
-			? Math.max(RATE_LIMIT_WAIT_MS, retryAfterMs ?? 0)
-			: OVERLOADED_WAIT_MS;
-		this.sessions.set(sessionId, { kind, blockedAt: now, blockedUntil: now + wait });
+		const wait =
+			kind === "rate_limit"
+				? Math.max(RATE_LIMIT_WAIT_MS, retryAfterMs ?? 0)
+				: OVERLOADED_WAIT_MS;
+		this.sessions.set(sessionId, {
+			kind,
+			blockedAt: now,
+			blockedUntil: now + wait,
+		});
 		if (this.sharedLimiter && kind === "rate_limit") {
 			this.sharedLeases.delete(sessionId);
 			this.enqueueShared(() => this.sharedLimiter!.record429(retryAfterMs));
@@ -122,7 +152,9 @@ export class OpenLimitsTransientRecovery {
 		if (this.sharedLimiter) {
 			const lease = this.sharedLeases.get(sessionId);
 			this.sharedLeases.delete(sessionId);
-			this.enqueueShared(() => this.sharedLimiter!.recordSuccess(undefined, lease));
+			this.enqueueShared(() =>
+				this.sharedLimiter!.recordSuccess(undefined, lease),
+			);
 		}
 		// A success is a global wake/probe signal, not permission to clear
 		// another session's circuit. That session must probe and re-classify its
@@ -153,7 +185,6 @@ export class OpenLimitsTransientRecovery {
 			return undefined;
 		}
 	}
-
 
 	private async recordTransientFailure(
 		sessionId: string,
@@ -215,11 +246,15 @@ export class OpenLimitsTransientRecovery {
 					.filter((entry) => entry.kind === "overloaded")
 					.reduce((total, entry) => total + entry.requestCount, 0),
 				sessions,
-				...(this.legacyFailures.length ? { legacySessions: this.legacyFailures } : {}),
+				...(this.legacyFailures.length
+					? { legacySessions: this.legacyFailures }
+					: {}),
 			};
 			const temporary = `${this.rateLimitLogPath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
 			try {
-				await writeFile(temporary, JSON.stringify(payload, null, 2), { mode: 0o600 });
+				await writeFile(temporary, JSON.stringify(payload, null, 2), {
+					mode: 0o600,
+				});
 				await rename(temporary, this.rateLimitLogPath);
 			} finally {
 				await rm(temporary, { force: true }).catch(() => {});

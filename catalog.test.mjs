@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
-import { ANTHROPIC_MODELS, CHAT_MODELS, GPT_CHAT_MODELS, RESPONSES_MODELS, modelsForLiveIds } from "./catalog.ts";
+import {
+  ANTHROPIC_MODELS,
+  CHAT_MODELS,
+  GPT_CHAT_MODELS,
+  RESPONSES_MODELS,
+  modelsForLiveIds,
+} from "./catalog.ts";
 import { partitionModelIds } from "./docs-fetcher.ts";
 
 describe("OpenAI Responses reasoning levels", () => {
@@ -24,7 +30,9 @@ describe("OpenAI Responses reasoning levels", () => {
   );
 
   test("older GPT models expose native off/xhigh without max", () => {
-    const model = RESPONSES_MODELS.find((candidate) => candidate.id === "gpt-5.5");
+    const model = RESPONSES_MODELS.find(
+      (candidate) => candidate.id === "gpt-5.5",
+    );
 
     expect(model).toBeDefined();
     expect(model?.thinkingLevelMap.off).toBe("none");
@@ -42,7 +50,9 @@ describe("catalog compatibility", () => {
   });
 
   test("Claude Opus 5 exposes the documented 1M context", () => {
-    expect(ANTHROPIC_MODELS.find((model) => model.id === "claude-opus-5")).toMatchObject({
+    expect(
+      ANTHROPIC_MODELS.find((model) => model.id === "claude-opus-5"),
+    ).toMatchObject({
       contextWindow: 1_000_000,
       maxTokens: 128_000,
     });
@@ -56,14 +66,21 @@ describe("catalog compatibility", () => {
         requiresReasoningContentOnAssistantMessages: true,
       });
     }
-    expect(GPT_CHAT_MODELS.find((model) => model.id === "gpt-5.6-sol")?.thinkingLevelMap.max).toBe("max");
+    expect(
+      GPT_CHAT_MODELS.find((model) => model.id === "gpt-5.6-sol")
+        ?.thinkingLevelMap.max,
+    ).toBe("max");
   });
 
   test("Chat Completions tolerate streams without finish_reason on Pi 0.84", () => {
-    expect(CHAT_MODELS.find((model) => model.id === "z-ai/glm-5.2")?.compat).toMatchObject({
+    expect(
+      CHAT_MODELS.find((model) => model.id === "z-ai/glm-5.2")?.compat,
+    ).toMatchObject({
       supportsFinishReason: false,
     });
-    expect(GPT_CHAT_MODELS.find((model) => model.id === "gpt-5.6-sol")?.compat).toMatchObject({
+    expect(
+      GPT_CHAT_MODELS.find((model) => model.id === "gpt-5.6-sol")?.compat,
+    ).toMatchObject({
       supportsFinishReason: false,
     });
   });
@@ -87,9 +104,12 @@ describe("catalog compatibility", () => {
       };
       for await (const _event of openAICompletionsApi().streamSimple(
         model,
-        { messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+        {
+          messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        },
         { apiKey: "test", reasoning: "max" },
-      )) {}
+      )) {
+      }
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -98,13 +118,18 @@ describe("catalog compatibility", () => {
   });
 
   test("chat families carry explicit replay/stream formats", () => {
-    const deepseek = CHAT_MODELS.find((model) => model.id === "deepseek/deepseek-v4-pro");
+    const deepseek = CHAT_MODELS.find(
+      (model) => model.id === "deepseek/deepseek-v4-pro",
+    );
     const zai = CHAT_MODELS.find((model) => model.id === "z-ai/glm-5.2");
     expect(deepseek?.compat).toMatchObject({
       thinkingFormat: "deepseek",
       requiresReasoningContentOnAssistantMessages: true,
     });
-    expect(zai?.compat).toMatchObject({ thinkingFormat: "zai", zaiToolStream: true });
+    expect(zai?.compat).toMatchObject({
+      thinkingFormat: "zai",
+      zaiToolStream: true,
+    });
   });
 });
 
@@ -122,12 +147,26 @@ describe("live catalog", () => {
     expect(partitionModelIds(ids)).toEqual({
       anthropic: ["anthropic/claude-sonnet-5"],
       responses: ["openai/gpt-5.6-sol"],
-      chat: ["deepseek/deepseek-v4-pro", "minimax/minimax-future", "minimax/minimax-m3", "openai/gpt-5.6-sol", "z-ai/glm-5.2"],
+      chat: [
+        "deepseek/deepseek-v4-pro",
+        "minimax/minimax-future",
+        "minimax/minimax-m3",
+        "openai/gpt-5.6-sol",
+        "z-ai/glm-5.2",
+      ],
     });
   });
 
   test("openai/* IDs surface in the chat bucket with their static metadata", () => {
-    const live = ["openai/gpt-5.6-sol", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna", "openai/gpt-5.5", "openai/gpt-5.4", "openai/gpt-5.4-mini", "openai/gpt-5.3-codex-spark"];
+    const live = [
+      "openai/gpt-5.6-sol",
+      "openai/gpt-5.6-terra",
+      "openai/gpt-5.6-luna",
+      "openai/gpt-5.5",
+      "openai/gpt-5.4",
+      "openai/gpt-5.4-mini",
+      "openai/gpt-5.3-codex-spark",
+    ];
     const chat = modelsForLiveIds("chat", live);
     const byId = Object.fromEntries(chat.map((m) => [m.id, m]));
 
@@ -148,7 +187,9 @@ describe("live catalog", () => {
   });
 
   test("preserves legacy short IDs for Claude and GPT", () => {
-    expect(modelsForLiveIds("anthropic", [ids[0]])[0].id).toBe("claude-sonnet-5");
+    expect(modelsForLiveIds("anthropic", [ids[0]])[0].id).toBe(
+      "claude-sonnet-5",
+    );
     expect(modelsForLiveIds("responses", [ids[1]])[0].id).toBe("gpt-5.6-sol");
     expect(modelsForLiveIds("chat", [ids[3]])[0].id).toBe("minimax/minimax-m3");
   });
@@ -164,17 +205,26 @@ describe("live catalog", () => {
 
   test("creates conservative metadata for future models", () => {
     const model = modelsForLiveIds("responses", ["openai/gpt-future"])[0];
-    expect(model).toMatchObject({ id: "gpt-future", reasoning: true, contextWindow: 128_000 });
+    expect(model).toMatchObject({
+      id: "gpt-future",
+      reasoning: true,
+      contextWindow: 128_000,
+    });
   });
 
   test("preserves family compatibility for future models", () => {
-    const anthropic = modelsForLiveIds("anthropic", ["anthropic/claude-future"])[0];
+    const anthropic = modelsForLiveIds("anthropic", [
+      "anthropic/claude-future",
+    ])[0];
     const zai = modelsForLiveIds("chat", ["z-ai/glm-future"])[0];
     const deepseek = modelsForLiveIds("chat", ["deepseek/deepseek-future"])[0];
     const minimax = modelsForLiveIds("chat", ["minimax/minimax-future"])[0];
 
     expect(anthropic.compat).toMatchObject({ forceAdaptiveThinking: true });
-    expect(zai.compat).toMatchObject({ thinkingFormat: "zai", zaiToolStream: true });
+    expect(zai.compat).toMatchObject({
+      thinkingFormat: "zai",
+      zaiToolStream: true,
+    });
     expect(deepseek.compat).toMatchObject({
       thinkingFormat: "deepseek",
       requiresReasoningContentOnAssistantMessages: true,

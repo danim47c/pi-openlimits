@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
 	type Api,
+	type AssistantMessage,
 	anthropicMessagesApi,
 	type Context,
 	createAssistantMessageEventStream,
@@ -45,30 +46,69 @@ import { fetchLiveCatalog, type LiveCatalog } from "./docs-fetcher.ts";
 import { preparePayloadForCompaction } from "./payload-guard.ts";
 import { loadPricingOverrides, resolveModelPricing } from "./pricing.ts";
 import { OpenLimitsRateLimiter, parseRetryAfter } from "./rate-limit.ts";
-import { OpenLimitsTransientRecovery, type TransientKind } from "./transient-recovery.ts";
+import {
+	OpenLimitsTransientRecovery,
+	type TransientKind,
+} from "./transient-recovery.ts";
 
-function retryAfterFromHeaders(headers: Record<string, string> | undefined): number | undefined {
+function retryAfterFromHeaders(
+	headers: Record<string, string> | undefined,
+): number | undefined {
 	if (!headers) return undefined;
-	const entry = Object.entries(headers).find(([name]) => name.toLowerCase() === "retry-after");
+	const entry = Object.entries(headers).find(
+		([name]) => name.toLowerCase() === "retry-after",
+	);
 	return parseRetryAfter(entry?.[1]);
+}
+
+type OpenLimitsRequestPayload =
+	| Record<string, unknown>
+	| readonly unknown[]
+	| string
+	| number
+	| boolean
+	| null
+	| undefined;
+
+function parseOpenLimitsRequestPayload(
+	payload: unknown,
+): OpenLimitsRequestPayload {
+	if (payload === null || payload === undefined) return payload;
+	if (Array.isArray(payload)) return payload;
+	if (typeof payload === "object") {
+		// SAFETY: the object branch excludes null and arrays above; JSON request
+		// payloads use a string-keyed record at this boundary.
+		return payload as Record<string, unknown>;
+	}
+	if (
+		typeof payload === "string" ||
+		typeof payload === "number" ||
+		typeof payload === "boolean"
+	)
+		return payload;
+	throw new TypeError("OpenLimits provider payload must be JSON-compatible");
 }
 
 function enforceOpenLimitsReasoningEffort(
 	payload: unknown,
 	model: Model<Api>,
 	reasoning: SimpleStreamOptions["reasoning"],
-): unknown {
+): OpenLimitsRequestPayload {
+	const parsedPayload = parseOpenLimitsRequestPayload(payload);
 	if (
 		model.provider !== "openlimits" ||
 		model.api !== "openai-completions" ||
 		reasoning === undefined ||
-		typeof payload !== "object" ||
-		payload === null
+		typeof parsedPayload !== "object" ||
+		parsedPayload === null ||
+		Array.isArray(parsedPayload)
 	)
-		return payload;
+		return parsedPayload;
 
 	const effort = model.thinkingLevelMap?.[reasoning] ?? reasoning;
-	return typeof effort === "string" ? { ...payload, reasoning_effort: effort } : payload;
+	return typeof effort === "string"
+		? { ...parsedPayload, reasoning_effort: effort }
+		: parsedPayload;
 }
 
 /**
@@ -90,6 +130,13 @@ export const TRANSIENT_MAX_ATTEMPTS = 3;
  * before the provider exhausts its invalid-response retry budget.
  */
 export const EMPTY_RESPONSE_CONTEXT_OVERFLOW_THRESHOLD = 0.9;
+/**
+ * Pi's subagent watchdog observes assistant stream events. A long upstream
+ * request can otherwise look idle because response content is buffered until
+ * `done` for safe retry. No-op thinking deltas keep the run observable without
+ * adding text, tool calls, or persisted assistant content.
+ */
+export const STREAM_PROGRESS_HEARTBEAT_MS = 30_000;
 const DEFAULT_EMPTY_RESPONSE_LOG = join(
 	homedir(),
 	".pi",
@@ -114,6 +161,8 @@ export type EmptyResponseRetryPolicy = {
 	rateLimitMaxAttempts?: number;
 	/** Maximum overload attempts before handing the provider error to Pi. */
 	overloadMaxAttempts?: number;
+	/** Interval for no-op stream heartbeats; zero disables them in tests/tools. */
+	progressHeartbeatMs?: number;
 };
 
 function emptyResponseLogPath(): string {
@@ -121,14 +170,19 @@ function emptyResponseLogPath(): string {
 }
 
 function rateLimitEventsLogPath(): string {
-	return process.env.OPENLIMITS_RATE_LIMIT_EVENTS_LOG ?? DEFAULT_RATE_LIMIT_EVENTS_LOG;
+	return (
+		process.env.OPENLIMITS_RATE_LIMIT_EVENTS_LOG ?? DEFAULT_RATE_LIMIT_EVENTS_LOG
+	);
 }
 
 function sanitizeDiagnosticText(value: string, maxLength = 500): string {
 	return value
 		.replace(/Bearer\s+[^\s,;]+/gi, "Bearer [redacted]")
 		.replace(/\b(?:sk|key|token|secret)[-_][A-Za-z0-9_-]{8,}\b/gi, "[redacted]")
-		.replace(/([?&](?:api[_-]?key|token|access[_-]?token|authorization)=)[^&\s]+/gi, "$1[redacted]")
+		.replace(
+			/([?&](?:api[_-]?key|token|access[_-]?token|authorization)=)[^&\s]+/gi,
+			"$1[redacted]",
+		)
 		.slice(0, maxLength);
 }
 
@@ -139,9 +193,13 @@ type DiagnosticErrorMetadata = {
 	requestId?: string;
 };
 
-function extractDiagnosticErrorMetadata(value: string): DiagnosticErrorMetadata {
+function extractDiagnosticErrorMetadata(
+	value: string,
+): DiagnosticErrorMetadata {
 	const metadata: DiagnosticErrorMetadata = {};
-	const statusMatch = value.match(/(?:\b(?:OpenAI|Anthropic) API error\s*\()?([1-5]\d{2})\)?/i);
+	const statusMatch = value.match(
+		/(?:\b(?:OpenAI|Anthropic) API error\s*\()?([1-5]\d{2})\)?/i,
+	);
 	if (statusMatch) metadata.httpStatus = Number(statusMatch[1]);
 
 	let parsed: unknown;
@@ -172,7 +230,9 @@ function extractDiagnosticErrorMetadata(value: string): DiagnosticErrorMetadata 
 			(typeof record.code === "string" || typeof record.code === "number")
 		)
 			metadata.errorCode =
-				typeof record.code === "string" ? sanitizeDiagnosticText(record.code, 100) : record.code;
+				typeof record.code === "string"
+					? sanitizeDiagnosticText(record.code, 100)
+					: record.code;
 		if (metadata.requestId === undefined) {
 			for (const key of ["request_id", "requestId", "request-id"] as const) {
 				if (typeof record[key] === "string") {
@@ -277,7 +337,11 @@ function summarizePayload(payload: unknown): EmptyResponseEvidence["payload"] {
 		serialized = String(payload);
 	}
 	const digest = createHash("sha256").update(serialized).digest("hex");
-	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+	if (
+		typeof payload !== "object" ||
+		payload === null ||
+		Array.isArray(payload)
+	) {
 		return { sha256: digest, keys: [] };
 	}
 	const record = payload as Record<string, unknown>;
@@ -316,7 +380,10 @@ function estimateDiagnosticContentChars(content: unknown): number {
 		const candidate = block as Record<string, unknown>;
 		if (candidate.type === "text" && typeof candidate.text === "string") {
 			chars += candidate.text.length;
-		} else if (candidate.type === "thinking" && typeof candidate.thinking === "string") {
+		} else if (
+			candidate.type === "thinking" &&
+			typeof candidate.thinking === "string"
+		) {
 			chars += candidate.thinking.length;
 		} else if (candidate.type === "image") {
 			chars += DIAGNOSTIC_IMAGE_CHARS;
@@ -334,8 +401,12 @@ function estimateDiagnosticContentChars(content: unknown): number {
 	return chars;
 }
 
-function estimateDiagnosticMessageTokens(message: Context["messages"][number]): number {
-	return Math.ceil(estimateDiagnosticContentChars(message.content) / DIAGNOSTIC_CHARS_PER_TOKEN);
+function estimateDiagnosticMessageTokens(
+	message: Context["messages"][number],
+): number {
+	return Math.ceil(
+		estimateDiagnosticContentChars(message.content) / DIAGNOSTIC_CHARS_PER_TOKEN,
+	);
 }
 
 /**
@@ -357,7 +428,8 @@ function estimateDiagnosticContextTokens(context: Context): number {
 			continue;
 		const usage = message.usage;
 		const tokens =
-			usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+			usage.totalTokens ||
+			usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 		if (tokens > 0) {
 			latestUsageTokens = tokens;
 			latestUsageIndex = index;
@@ -365,7 +437,11 @@ function estimateDiagnosticContextTokens(context: Context): number {
 	}
 	if (latestUsageIndex >= 0) {
 		let trailingTokens = 0;
-		for (let index = latestUsageIndex + 1; index < context.messages.length; index += 1) {
+		for (
+			let index = latestUsageIndex + 1;
+			index < context.messages.length;
+			index += 1
+		) {
 			trailingTokens += estimateDiagnosticMessageTokens(context.messages[index]);
 		}
 		return latestUsageTokens + trailingTokens;
@@ -380,7 +456,8 @@ function estimateDiagnosticContextTokens(context: Context): number {
 		}
 	}
 	for (const message of context.messages) {
-		chars += estimateDiagnosticMessageTokens(message) * DIAGNOSTIC_CHARS_PER_TOKEN;
+		chars +=
+			estimateDiagnosticMessageTokens(message) * DIAGNOSTIC_CHARS_PER_TOKEN;
 	}
 	return Math.ceil(chars / DIAGNOSTIC_CHARS_PER_TOKEN);
 }
@@ -404,17 +481,21 @@ function summarizeEvent(event: unknown): Record<string, unknown> {
 	const summary: Record<string, unknown> = { type: candidate.type };
 	if (typeof candidate.reason === "string") summary.reason = candidate.reason;
 	for (const key of ["delta", "text", "content"] as const) {
-		if (typeof candidate[key] === "string") summary[`${key}Length`] = candidate[key].length;
+		if (typeof candidate[key] === "string")
+			summary[`${key}Length`] = candidate[key].length;
 	}
 	const message = candidate.message ?? candidate.error;
 	if (typeof message === "object" && message !== null) {
 		const assistant = message as Record<string, unknown>;
-		if (typeof assistant.stopReason === "string") summary.stopReason = assistant.stopReason;
-		if (typeof assistant.responseId === "string") summary.responseId = assistant.responseId;
+		if (typeof assistant.stopReason === "string")
+			summary.stopReason = assistant.stopReason;
+		if (typeof assistant.responseId === "string")
+			summary.responseId = assistant.responseId;
 		if (typeof assistant.errorMessage === "string") {
 			summary.errorMessage = sanitizeDiagnosticText(assistant.errorMessage);
 			const metadata = extractDiagnosticErrorMetadata(assistant.errorMessage);
-			if (metadata.httpStatus !== undefined) summary.httpStatus = metadata.httpStatus;
+			if (metadata.httpStatus !== undefined)
+				summary.httpStatus = metadata.httpStatus;
 			if (metadata.errorType !== undefined) summary.errorType = metadata.errorType;
 			if (metadata.errorCode !== undefined) summary.errorCode = metadata.errorCode;
 			if (metadata.requestId !== undefined) summary.requestId = metadata.requestId;
@@ -465,7 +546,9 @@ function recordEmptyResponseEvidence(evidence: EmptyResponseEvidence): void {
 	void (async () => {
 		try {
 			await mkdir(dirname(emptyResponseLogPath()), { recursive: true });
-			await appendFile(emptyResponseLogPath(), `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
+			await appendFile(emptyResponseLogPath(), `${JSON.stringify(evidence)}\n`, {
+				mode: 0o600,
+			});
 		} catch {
 			// Diagnostics must never interrupt or close the Pi stream.
 		}
@@ -476,7 +559,9 @@ function recordRateLimitEvidence(evidence: RateLimitEvidence): void {
 	void (async () => {
 		try {
 			await mkdir(dirname(rateLimitEventsLogPath()), { recursive: true });
-			await appendFile(rateLimitEventsLogPath(), `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
+			await appendFile(rateLimitEventsLogPath(), `${JSON.stringify(evidence)}\n`, {
+				mode: 0o600,
+			});
 		} catch {
 			// Diagnostics must never interrupt or close the Pi stream.
 		}
@@ -537,6 +622,77 @@ function abortError(): Error {
 	return new DOMException("The operation was aborted.", "AbortError");
 }
 
+function createProgressPartial(model: Model<Api>): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				total: 0,
+			},
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
+type ProgressHeartbeat = {
+	enabled: boolean;
+	stop: () => void;
+};
+
+function startProgressHeartbeat(
+	stream: ReturnType<typeof createAssistantMessageEventStream>,
+	model: Model<Api>,
+	signal: AbortSignal | undefined,
+	intervalMs: number,
+): ProgressHeartbeat {
+	if (!Number.isFinite(intervalMs) || intervalMs <= 0 || signal?.aborted) {
+		return { enabled: false, stop: () => {} };
+	}
+
+	const partial = createProgressPartial(model);
+	let stopped = false;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const stop = () => {
+		if (stopped) return;
+		stopped = true;
+		if (timer) clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+	};
+	const onAbort = () => stop();
+	const beat = () => {
+		if (stopped || signal?.aborted) {
+			stop();
+			return;
+		}
+		stream.push({
+			type: "thinking_delta",
+			contentIndex: 0,
+			delta: "",
+			partial,
+		});
+		timer = setTimeout(beat, intervalMs);
+	};
+
+	signal?.addEventListener("abort", onAbort, { once: true });
+	stream.push({ type: "start", partial });
+	timer = setTimeout(beat, intervalMs);
+	return { enabled: true, stop };
+}
+
 function isAbortedStreamEvent(event: unknown): boolean {
 	if (typeof event !== "object" || event === null) return false;
 	const candidate = event as {
@@ -545,10 +701,16 @@ function isAbortedStreamEvent(event: unknown): boolean {
 		error?: { stopReason?: unknown; errorMessage?: unknown };
 	};
 	if (candidate.type !== "error") return false;
-	if (candidate.reason === "aborted" || candidate.error?.stopReason === "aborted") return true;
+	if (
+		candidate.reason === "aborted" ||
+		candidate.error?.stopReason === "aborted"
+	)
+		return true;
 	return (
 		typeof candidate.error?.errorMessage === "string" &&
-		/\b(?:the )?operation was aborted\b|\brequest was aborted\b/i.test(candidate.error.errorMessage)
+		/\b(?:the )?operation was aborted\b|\brequest was aborted\b/i.test(
+			candidate.error.errorMessage,
+		)
 	);
 }
 
@@ -558,15 +720,22 @@ export function rateLimitedStream(
 	notify?: (message: string, level?: "info" | "warning" | "error") => void,
 	policy?: EmptyResponseRetryPolicy,
 ): ProviderConfig["streamSimple"] {
-	return (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
+	return (
+		model: Model<Api>,
+		context: Context,
+		options?: SimpleStreamOptions,
+	) => {
 		const stream = createAssistantMessageEventStream();
 		const sessionId =
-			options?.sessionId ?? `${model.provider}/${model.id}/${Math.random().toString(36).slice(2)}`;
-		const configuredMaxAttempts = policy?.maxAttempts ?? EMPTY_RESPONSE_MAX_ATTEMPTS;
+			options?.sessionId ??
+			`${model.provider}/${model.id}/${Math.random().toString(36).slice(2)}`;
+		const configuredMaxAttempts =
+			policy?.maxAttempts ?? EMPTY_RESPONSE_MAX_ATTEMPTS;
 		const emptyResponseMaxAttempts = Number.isFinite(configuredMaxAttempts)
 			? Math.max(1, Math.floor(configuredMaxAttempts))
 			: EMPTY_RESPONSE_MAX_ATTEMPTS;
-		const configuredRetryDelayMs = policy?.retryDelayMs ?? EMPTY_RESPONSE_RETRY_MS;
+		const configuredRetryDelayMs =
+			policy?.retryDelayMs ?? EMPTY_RESPONSE_RETRY_MS;
 		const emptyResponseRetryDelayMs = Number.isFinite(configuredRetryDelayMs)
 			? Math.max(0, configuredRetryDelayMs)
 			: EMPTY_RESPONSE_RETRY_MS;
@@ -580,6 +749,12 @@ export function rateLimitedStream(
 		const overloadMaxAttempts = Number.isFinite(configuredOverloadMaxAttempts)
 			? Math.max(1, Math.floor(configuredOverloadMaxAttempts))
 			: TRANSIENT_MAX_ATTEMPTS;
+		const progressHeartbeatMs = (() => {
+			if (Number.isFinite(policy?.progressHeartbeatMs)) {
+				return Math.max(0, Math.floor(policy?.progressHeartbeatMs ?? 0));
+			}
+			return STREAM_PROGRESS_HEARTBEAT_MS;
+		})();
 		let emptyResponseAttempts = 0;
 		let rateLimitAttempts = 0;
 		let overloadAttempts = 0;
@@ -599,13 +774,25 @@ export function rateLimitedStream(
 				/* UI must never affect recovery. */
 			}
 		};
+		const progressHeartbeat =
+			options?.sessionId === undefined
+				? undefined
+				: startProgressHeartbeat(
+						stream,
+						model,
+						options.signal,
+						progressHeartbeatMs,
+					);
 
 		void (async () => {
 			try {
 				for (;;) {
 					const waiting = recovery.getState(sessionId);
 					if (waiting) {
-						const seconds = Math.max(1, Math.ceil((waiting.blockedUntil - Date.now()) / 1_000));
+						const seconds = Math.max(
+							1,
+							Math.ceil((waiting.blockedUntil - Date.now()) / 1_000),
+						);
 						display(
 							waiting.kind === "rate_limit"
 								? `OpenLimits: rate limit en esta sesión; reintentando en ${seconds}s…`
@@ -640,8 +827,13 @@ export function rateLimitedStream(
 							: undefined;
 					const likelyContextOverflow =
 						contextWindow !== undefined &&
-						estimatedContextTokens >= contextWindow * EMPTY_RESPONSE_CONTEXT_OVERFLOW_THRESHOLD;
-					const recordTransient = (kind: TransientKind, retryAfterMs?: number, sample?: string) => {
+						estimatedContextTokens >=
+							contextWindow * EMPTY_RESPONSE_CONTEXT_OVERFLOW_THRESHOLD;
+					const recordTransient = (
+						kind: TransientKind,
+						retryAfterMs?: number,
+						sample?: string,
+					) => {
 						if (recordedTransient) return;
 						recordedTransient = true;
 						if (kind === "rate_limit") rateLimitAttempts += 1;
@@ -651,7 +843,9 @@ export function rateLimitedStream(
 							sessionId,
 							kind,
 							retryAfterMs,
-							typeof sample === "string" ? sanitizeDiagnosticText(sample, 200) : undefined,
+							typeof sample === "string"
+								? sanitizeDiagnosticText(sample, 200)
+								: undefined,
 						);
 						display(
 							kind === "rate_limit"
@@ -705,7 +899,9 @@ export function rateLimitedStream(
 							provider: model.provider,
 							api: model.api,
 							model: model.id,
-							...(safeBaseUrl(model.baseUrl) ? { baseUrl: safeBaseUrl(model.baseUrl) } : {}),
+							...(safeBaseUrl(model.baseUrl)
+								? { baseUrl: safeBaseUrl(model.baseUrl) }
+								: {}),
 							outcome,
 							durationMs: Date.now() - attemptStartedAt,
 							maxAttempts: emptyResponseMaxAttempts,
@@ -716,7 +912,7 @@ export function rateLimitedStream(
 							eventCount: eventEvidenceState.count,
 							...(eventEvidenceState.truncated ? { eventsTruncated: true } : {}),
 							...(estimatedContextTokens > 0 ? { estimatedContextTokens } : {}),
-							...(contextWindow !== undefined ? { contextWindow } : {}),
+							...(contextWindow === undefined ? {} : { contextWindow }),
 							...(likelyContextOverflow ? { likelyContextOverflow: true } : {}),
 						});
 					};
@@ -738,7 +934,7 @@ export function rateLimitedStream(
 							responseEvidence = {
 								status: response.status,
 								headers: summarizeResponseHeaders(response.headers),
-								...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+								...(retryAfterMs === undefined ? {} : { retryAfterMs }),
 							};
 							// HTTP status is authoritative. Body text is only a fallback when
 							// the transport reported a successful status.
@@ -764,10 +960,12 @@ export function rateLimitedStream(
 									provider: model.provider,
 									api: model.api,
 									model: model.id,
-									...(safeBaseUrl(model.baseUrl) ? { baseUrl: safeBaseUrl(model.baseUrl) } : {}),
+									...(safeBaseUrl(model.baseUrl)
+										? { baseUrl: safeBaseUrl(model.baseUrl) }
+										: {}),
 									status: response.status,
 									headers: summarizeResponseHeaders(response.headers),
-									...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+									...(retryAfterMs === undefined ? {} : { retryAfterMs }),
 									...(payloadEvidence ? { payload: payloadEvidence } : {}),
 									recovery: summarizeRecoveryState(recovery.getState(sessionId)),
 								});
@@ -792,6 +990,10 @@ export function rateLimitedStream(
 						if (options?.signal?.aborted || isAbortedStreamEvent(event)) {
 							throw abortError();
 						}
+						// The synthetic start emitted by the heartbeat already opens the
+						// assistant message for Pi. Suppress the provider's duplicate start;
+						// the real terminal message still replaces the synthetic partial.
+						if (event.type === "start" && progressHeartbeat?.enabled) continue;
 						if (isAssistantContentEvent(event)) attemptProducedContent = true;
 						// pi-ai surfaces a few HTTP-success stream truncations as an
 						// assistant error event. They are invalid responses, not a
@@ -836,16 +1038,20 @@ export function rateLimitedStream(
 								provider: model.provider,
 								api: model.api,
 								model: model.id,
-								...(safeBaseUrl(model.baseUrl) ? { baseUrl: safeBaseUrl(model.baseUrl) } : {}),
-								...(responseEvidence?.status !== undefined
-									? { status: responseEvidence.status }
-									: errorMetadata?.httpStatus !== undefined
-										? { status: errorMetadata.httpStatus }
-										: {}),
-								...(responseEvidence?.headers ? { headers: responseEvidence.headers } : {}),
-								...(responseEvidence?.retryAfterMs !== undefined
-									? { retryAfterMs: responseEvidence.retryAfterMs }
+								...(safeBaseUrl(model.baseUrl)
+									? { baseUrl: safeBaseUrl(model.baseUrl) }
 									: {}),
+								...(responseEvidence?.status === undefined
+									? errorMetadata?.httpStatus === undefined
+										? {}
+										: { status: errorMetadata.httpStatus }
+									: { status: responseEvidence.status }),
+								...(responseEvidence?.headers
+									? { headers: responseEvidence.headers }
+									: {}),
+								...(responseEvidence?.retryAfterMs === undefined
+									? {}
+									: { retryAfterMs: responseEvidence.retryAfterMs }),
 								...(payloadEvidence ? { payload: payloadEvidence } : {}),
 								event: eventEvidence.at(-1) ?? summarizeEvent(event),
 								events: eventEvidence,
@@ -888,15 +1094,14 @@ export function rateLimitedStream(
 					}
 					if (!validResponse && options?.signal?.aborted) throw abortError();
 					const transientAttemptsExhausted =
-						(responseTransient === "rate_limit" && rateLimitAttempts >= rateLimitMaxAttempts) ||
-						(responseTransient === "overloaded" && overloadAttempts >= overloadMaxAttempts);
-					if (
-						transientAttemptsExhausted &&
-						!validResponse &&
-						!terminalError
-					) {
+						(responseTransient === "rate_limit" &&
+							rateLimitAttempts >= rateLimitMaxAttempts) ||
+						(responseTransient === "overloaded" &&
+							overloadAttempts >= overloadMaxAttempts);
+					if (transientAttemptsExhausted && !validResponse && !terminalError) {
 						const kind = responseTransient ?? "overloaded";
-						const attempts = kind === "rate_limit" ? rateLimitAttempts : overloadAttempts;
+						const attempts =
+							kind === "rate_limit" ? rateLimitAttempts : overloadAttempts;
 						const diagnostic =
 							kind === "rate_limit"
 								? `OpenLimits rate limit persisted after ${attempts} attempts (429); retry later or use a fallback model.`
@@ -905,7 +1110,8 @@ export function rateLimitedStream(
 						emitPartialStreamError(diagnostic);
 					}
 					const invalidSuccessfulStream =
-						!terminalError && (invalidResponse || (!validResponse && !responseTransient));
+						!terminalError &&
+						(invalidResponse || (!validResponse && !responseTransient));
 					if (invalidSuccessfulStream) {
 						emptyResponseAttempts += 1;
 						const emptyOutcome = classifyEmptyResponseOutcome(eventEvidence);
@@ -917,7 +1123,10 @@ export function rateLimitedStream(
 							likelyContextOverflow &&
 							invalidSuccessfulStream &&
 							(!attemptProducedContent || emptyResponseAttempts > 1);
-						if (emptyResponseAttempts >= emptyResponseMaxAttempts || contextOverflowTerminal) {
+						if (
+							emptyResponseAttempts >= emptyResponseMaxAttempts ||
+							contextOverflowTerminal
+						) {
 							if (options?.signal?.aborted) throw abortError();
 							recordInvalidResponseEvidence(emptyOutcome);
 							const diagnostic = contextOverflowTerminal
@@ -954,7 +1163,10 @@ export function rateLimitedStream(
 							});
 							break;
 						}
-						await waitForEmptyResponseRetry(options?.signal, emptyResponseRetryDelayMs);
+						await waitForEmptyResponseRetry(
+							options?.signal,
+							emptyResponseRetryDelayMs,
+						);
 						if (options?.signal?.aborted) throw abortError();
 						recordInvalidResponseEvidence(emptyOutcome);
 						display(
@@ -971,7 +1183,8 @@ export function rateLimitedStream(
 						// eventual successful stream; never retry after this terminal event.
 						shouldRetry = false;
 						const globallyRecovered = recovery.recordSuccess(sessionId);
-						if (wasRecovering) display("OpenLimits: conexión recuperada.", "info", true);
+						if (wasRecovering)
+							display("OpenLimits: conexión recuperada.", "info", true);
 						else if (globallyRecovered)
 							display(
 								"OpenLimits: otra sesión detectó recuperación; probando de nuevo…",
@@ -1023,6 +1236,7 @@ export function rateLimitedStream(
 					},
 				});
 			} finally {
+				progressHeartbeat?.stop();
 				stream.end();
 			}
 		})();
@@ -1051,24 +1265,36 @@ function classifyTransientEvent(
 		provider?: unknown;
 		api?: unknown;
 	};
-	if (candidate.stopReason !== "error" || typeof candidate.errorMessage !== "string")
+	if (
+		candidate.stopReason !== "error" ||
+		typeof candidate.errorMessage !== "string"
+	)
 		return undefined;
 	const olProvider =
-		typeof candidate.provider === "string" ? candidate.provider === provider : true;
+		typeof candidate.provider === "string"
+			? candidate.provider === provider
+			: true;
 	const olApi = typeof candidate.api === "string" ? candidate.api === api : true;
 	if (!olProvider || !olApi) return undefined;
 	const text = candidate.errorMessage;
 	// Real OpenLimits rate limit phrasing (e.g. "429 {"…","type":"rate_limit_error",…}" or "429 The request could not be processed.").
-	if (provider.startsWith("openlimits") && isOpenLimitsRateLimitText(text)) return "rate_limit";
-	if (/servers? (?:are )?currently overloaded|overloaded/i.test(text)) return "overloaded";
-	if (provider.startsWith("openlimits") && /(?<!\d)5\d\d(?!\d)/.test(text)) return "overloaded";
+	if (provider.startsWith("openlimits") && isOpenLimitsRateLimitText(text))
+		return "rate_limit";
+	if (/servers? (?:are )?currently overloaded|overloaded/i.test(text))
+		return "overloaded";
+	if (provider.startsWith("openlimits") && /(?<!\d)5\d\d(?!\d)/.test(text))
+		return "overloaded";
 	if (
 		/stream ended before a terminal response event|stream ended without finish_reason|prematurely (?:closed|ended)|connection reset|ECONNRESET|fetch failed/i.test(
 			text,
 		)
 	)
 		return "overloaded";
-	if (/An error occurred while processing your request\. You can retry your request/i.test(text))
+	if (
+		/An error occurred while processing your request\. You can retry your request/i.test(
+			text,
+		)
+	)
 		return "overloaded";
 	return undefined;
 }
@@ -1077,7 +1303,8 @@ function isOpenLimitsRateLimitText(text: string): boolean {
 	const leadingStatus = text.match(
 		/^\s*(?:OpenAI|Anthropic) API error\s*\((\d{3})\)|^\s*(\d{3})\b/i,
 	);
-	if (leadingStatus && Number(leadingStatus[1] ?? leadingStatus[2]) !== 429) return false;
+	if (leadingStatus && Number(leadingStatus[1] ?? leadingStatus[2]) !== 429)
+		return false;
 	if (!/(?<![0-9])429(?![0-9])/.test(text)) return false;
 	if (text.includes("Our servers are currently overloaded")) return false;
 	if (/edge control plane/i.test(text)) return false;
@@ -1098,7 +1325,8 @@ function isValidDoneEvent(event: unknown): boolean {
 	return content.some((block) => {
 		if (typeof block !== "object" || block === null) return false;
 		const value = block as Record<string, unknown>;
-		if (value.type === "text") return typeof value.text === "string" && value.text.length > 0;
+		if (value.type === "text")
+			return typeof value.text === "string" && value.text.length > 0;
 		if (value.type !== "toolCall") return false;
 		return (
 			typeof value.id === "string" &&
@@ -1125,7 +1353,8 @@ function isAssistantContentEvent(event: unknown): boolean {
 		content?: unknown;
 		toolCall?: unknown;
 	};
-	if (candidate.type === "text_start" || candidate.type === "thinking_start") return false;
+	if (candidate.type === "text_start" || candidate.type === "thinking_start")
+		return false;
 	if (
 		candidate.type === "text_delta" ||
 		candidate.type === "thinking_delta" ||
@@ -1164,7 +1393,8 @@ function isAssistantContentEvent(event: unknown): boolean {
 			);
 		});
 	}
-	if (candidate.type !== "start" || !Array.isArray(candidate.partial?.content)) return false;
+	if (candidate.type !== "start" || !Array.isArray(candidate.partial?.content))
+		return false;
 	return candidate.partial.content.some((block) => {
 		if (typeof block !== "object" || block === null) return false;
 		const value = block as Record<string, unknown>;
@@ -1277,7 +1507,9 @@ function isOpenLimitsOverflowMessage(message: unknown): boolean {
  * adjusts the in-memory compaction boundary; it does not alter the journal or
  * manufacture a replacement message.
  */
-export function alignOverflowCompactionBoundary(event: OverflowCompactionHookEvent): boolean {
+export function alignOverflowCompactionBoundary(
+	event: OverflowCompactionHookEvent,
+): boolean {
 	if (
 		event.reason !== "overflow" ||
 		event.willRetry !== true ||
@@ -1304,7 +1536,9 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
 	const transientRecovery = new OpenLimitsTransientRecovery({
 		sharedLimiter: new OpenLimitsRateLimiter(),
 	});
-	let uiNotify: ((message: string, level?: "info" | "warning" | "error") => void) | undefined;
+	let uiNotify:
+		| ((message: string, level?: "info" | "warning" | "error") => void)
+		| undefined;
 	let errorRecoveryAttempted = false;
 	let sanitizeNextCompactionRequest = false;
 
@@ -1369,11 +1603,15 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
 			baseUrl: string,
 		): NonNullable<ProviderConfig["refreshModels"]> =>
 		async (rawContext) => {
+			// SAFETY: Pi 0.84's provider config delivers a generation-scoped
+			// snapshot, not the legacy scoped store. We narrow via RefreshContextCompat
+			// to keep both shapes under one signature.
 			const context = rawContext as unknown as RefreshContextCompat;
 			// Pi <=0.83 exposed the scoped store directly. Pi 0.84 passes a
 			// generation-scoped snapshot instead; prefer it and fall back only for
 			// older runtimes.
-			const cached = context.stored ?? (context.store ? await context.store.read() : undefined);
+			const cached =
+				context.stored ?? (context.store ? await context.store.read() : undefined);
 			const cachedModels = cached?.models.map(
 				({ provider: _provider, ...model }) => model as ProviderModelConfig,
 			);
@@ -1382,9 +1620,10 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
 			// before the compat/pricing fixes cannot suppress reasoning_effort or
 			// leave the footer with a stale all-zero cost.
 			const normalizedCachedModels = cachedModels?.map((model) => {
-				const staticModel = family === "chat"
-					? OPENLIMITS_CHAT_MODELS.find((candidate) => candidate.id === model.id)
-					: undefined;
+				const staticModel =
+					family === "chat"
+						? OPENLIMITS_CHAT_MODELS.find((candidate) => candidate.id === model.id)
+						: undefined;
 				return {
 					...model,
 					cost: resolveModelPricing(model.id, family, pricingOverrides),
@@ -1403,10 +1642,15 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
 				};
 			});
 			if (!context.allowNetwork) return normalizedCachedModels ?? staticModels;
-			if (!context.force && cached?.checkedAt && Date.now() - cached.checkedAt < CATALOG_TTL_MS) {
+			if (
+				!context.force &&
+				cached?.checkedAt &&
+				Date.now() - cached.checkedAt < CATALOG_TTL_MS
+			) {
 				return normalizedCachedModels ?? staticModels;
 			}
-			const key = context.credential?.type === "api_key" ? context.credential.key : apiKey;
+			const key =
+				context.credential?.type === "api_key" ? context.credential.key : apiKey;
 			if (!key) return normalizedCachedModels ?? staticModels;
 			inFlightCatalog ??= fetchLiveCatalog(key, context.signal).finally(() => {
 				inFlightCatalog = undefined;
@@ -1414,7 +1658,9 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
 			const catalog = await inFlightCatalog;
 			if (context.signal?.aborted) return normalizedCachedModels ?? staticModels;
 			const models =
-				catalog[family].length > 0 ? modelsForLiveIds(family, catalog[family]) : staticModels;
+				catalog[family].length > 0
+					? modelsForLiveIds(family, catalog[family])
+					: staticModels;
 			const persisted: RefreshCatalogEntry = {
 				checkedAt: Date.now(),
 				models: models.map((model) => ({
@@ -1442,8 +1688,10 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
 			"anthropic-beta": "interleaved-thinking-2025-05-14",
 		},
 		models: ANTHROPIC_MODELS,
-		streamSimple: rateLimitedStream(anthropicMessagesApi, transientRecovery, (message, level) =>
-			uiNotify?.(message, level),
+		streamSimple: rateLimitedStream(
+			anthropicMessagesApi,
+			transientRecovery,
+			(message, level) => uiNotify?.(message, level),
 		),
 		refreshModels: refresh(
 			"anthropic",
@@ -1460,8 +1708,10 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
 		api: "openai-responses",
 		apiKey,
 		models: RESPONSES_MODELS,
-		streamSimple: rateLimitedStream(openAIResponsesApi, transientRecovery, (message, level) =>
-			uiNotify?.(message, level),
+		streamSimple: rateLimitedStream(
+			openAIResponsesApi,
+			transientRecovery,
+			(message, level) => uiNotify?.(message, level),
 		),
 		refreshModels: refresh(
 			"responses",
@@ -1478,8 +1728,10 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
 		api: "openai-completions",
 		apiKey,
 		models: OPENLIMITS_CHAT_MODELS,
-		streamSimple: rateLimitedStream(openAICompletionsApi, transientRecovery, (message, level) =>
-			uiNotify?.(message, level),
+		streamSimple: rateLimitedStream(
+			openAICompletionsApi,
+			transientRecovery,
+			(message, level) => uiNotify?.(message, level),
 		),
 		refreshModels: refresh(
 			"chat",
