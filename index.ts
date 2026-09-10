@@ -137,6 +137,15 @@ export const EMPTY_RESPONSE_CONTEXT_OVERFLOW_THRESHOLD = 0.9;
  * adding text, tool calls, or persisted assistant content.
  */
 export const STREAM_PROGRESS_HEARTBEAT_MS = 30_000;
+/**
+ * A bounded retry burst (rate limit or overload) can hit the same transient
+ * state on every attempt. Without de-duplication each attempt re-displays an
+ * identical notice, which reads as a stuck loop instead of visible progress.
+ * Suppress an exact repeat of the last notice within this window; a changed
+ * message (a new countdown, a different failure kind, or recovery) always
+ * displays immediately regardless of this window.
+ */
+export const NOTICE_REPEAT_SUPPRESS_MS = 15_000;
 const DEFAULT_EMPTY_RESPONSE_LOG = join(
 	homedir(),
 	".pi",
@@ -760,14 +769,28 @@ export function rateLimitedStream(
 		let overloadAttempts = 0;
 		let attemptNumber = 0;
 		let lastNoticeAt = 0;
+		let lastNoticeMessage: string | undefined;
 		let wasRecovering = false;
+		// A worker can hit the same transient state on every bounded retry attempt
+		// (for example three overloaded attempts five seconds apart). Forcing an
+		// identical notice each time reads as a broken loop rather than progress,
+		// so an exact repeat within this window is swallowed even when `force` is
+		// set. A *different* message (a changed countdown, a new failure kind, or
+		// eventual recovery) always displays immediately.
 		const display = (
 			message: string,
 			level: "info" | "warning" | "error" = "info",
 			force = false,
 		) => {
-			if (!notify || (!force && Date.now() - lastNoticeAt < 9_000)) return;
-			lastNoticeAt = Date.now();
+			if (!notify) return;
+			const now = Date.now();
+			const isExactRepeat =
+				message === lastNoticeMessage &&
+				now - lastNoticeAt < NOTICE_REPEAT_SUPPRESS_MS;
+			if (isExactRepeat) return;
+			if (!force && now - lastNoticeAt < 9_000) return;
+			lastNoticeAt = now;
+			lastNoticeMessage = message;
 			try {
 				notify(message, level);
 			} catch {
@@ -1102,11 +1125,24 @@ export function rateLimitedStream(
 						const kind = responseTransient ?? "overloaded";
 						const attempts =
 							kind === "rate_limit" ? rateLimitAttempts : overloadAttempts;
+						// Deliberately worded to stay outside pi-ai's own
+						// `isRetryableAssistantError` vocabulary (no "rate limit", "429",
+						// "overloaded", or 5xx digits): this diagnostic is our *final*
+						// word after our own bounded, circuit-aware retry budget is
+						// already exhausted, so Pi's generic native auto-retry must not
+						// layer its own blind exponential-backoff retry on top (that
+						// produced the exact repeated "servidores saturados" / "Error:
+						// ... remained overloaded" noise this wording avoids). It still
+						// contains "provider"/"unavailable"/"upstream" so pi-subagents'
+						// broader fallback-model classifier can select a configured
+						// `fallbackModels` entry for the *next* run.
 						const diagnostic =
 							kind === "rate_limit"
-								? `OpenLimits rate limit persisted after ${attempts} attempts (429); retry later or use a fallback model.`
-								: `OpenLimits upstream remained overloaded after ${attempts} attempts; retry later or use a fallback model.`;
-						display(diagnostic, "error", true);
+								? `OpenLimits upstream provider stayed unavailable for this session after ${attempts} attempts of repeated request throttling; retry later or use a fallback model.`
+								: `OpenLimits upstream provider stayed unavailable for this session after ${attempts} attempts of repeated upstream failures; retry later or use a fallback model.`;
+						// The terminal assistant message pushed below already carries this
+						// exact diagnostic and Pi renders it in the transcript; a matching
+						// toast would only repeat the same line a second time.
 						emitPartialStreamError(diagnostic);
 					}
 					const invalidSuccessfulStream =
@@ -1132,7 +1168,9 @@ export function rateLimitedStream(
 							const diagnostic = contextOverflowTerminal
 								? `Your input exceeds the context window of this model. OpenLimits returned an invalid HTTP 2xx stream after ${emptyResponseAttempts} attempt(s) (${emptyOutcome}; estimated context ${estimatedContextTokens}/${contextWindow} tokens).`
 								: `OpenLimits response validation budget exhausted after ${emptyResponseAttempts} invalid HTTP 2xx stream(s) (${emptyOutcome}).`;
-							display(diagnostic, "error", true);
+							// The terminal assistant message pushed below already carries
+							// this exact diagnostic and Pi renders it in the transcript; a
+							// matching toast would only repeat the same line a second time.
 							stream.push({
 								type: "error",
 								reason: "error",

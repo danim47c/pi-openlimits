@@ -55,6 +55,46 @@ status before steering, interrupting, or relaunching it.
 - 5xx / `overloaded` responses retry every five seconds, also up to three
   times.
 
+## Exhausted-retry diagnostics and notice noise
+
+When the bounded rate-limit/overload retry budget is exhausted, the provider
+surfaces exactly one terminal assistant error, worded to avoid a specific
+failure mode: Pi core's own generic auto-retry (`AgentSession._prepareRetry`,
+driven by `isRetryableAssistantError` from `@earendil-works/pi-ai`) treats any
+assistant error containing words like "rate limit", "429", "overloaded", or a
+5xx digit sequence as retryable and transparently retries the *whole turn*
+again with its own exponential backoff (`baseDelayMs * 2^attempt`, default 3
+attempts). Layering that generic retry on top of this provider's own
+circuit-aware retry is redundant — blind, unaware of the shared rate-limit
+circuit, and it is what previously produced a visibly repeating "OpenLimits:
+servidores saturados…" / "Error: … remained overloaded…" loop that looked like
+a stuck run.
+
+The exhausted diagnostic therefore:
+
+- never contains "rate limit", "429", "overloaded", or 5xx digits, so Pi core's
+  `isRetryableAssistantError` returns `false` and does not auto-retry the turn;
+- still contains "provider" and "unavailable" (and the bare word "upstream"),
+  matching `pi-subagents`' broader `isRetryableModelFailure` classifier, so a
+  configured `fallbackModels` entry can still be selected for the *next* run;
+- is only shown once, through the terminal assistant message that Pi renders
+  in the transcript. The provider does not additionally push it through
+  `notify()`, which previously duplicated the exact same line as a toast.
+
+Separately, an *interim* notice (`"OpenLimits: servidores saturados;
+reintentando en 5s…"` or the rate-limit equivalent) fires once per retry
+attempt while the budget is not yet exhausted. Because a bounded burst can
+repeat the identical state on every attempt, an exact repeat of the previous
+notice text within `NOTICE_REPEAT_SUPPRESS_MS` (15 s) is swallowed even though
+these notices are otherwise forced past the normal 9 s de-dup window. A
+genuinely different message — a new countdown, a different failure kind, or
+recovery — always displays immediately.
+
+If you author a NEW terminal diagnostic in this provider, keep it out of
+pi-ai's `RETRYABLE_PROVIDER_ERROR_PATTERN` vocabulary once our own retry
+budget is already exhausted, or Pi will invisibly retry the whole turn again
+and reproduce the same noise this section describes.
+
 ## Diagnostic logs (off by default for events, on for empty/429)
 
 - `~/.pi/agent/openlimits-rate-limit.json` — current aggregate circuit state.

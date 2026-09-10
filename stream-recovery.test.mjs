@@ -157,7 +157,22 @@ describe("rateLimitedStream 429 recovery", () => {
 		expect(attempts).toBe(2);
 		expect(events).toHaveLength(1);
 		expect(events[0]).toMatchObject({ type: "error", reason: "error" });
-		expect(events[0].error.errorMessage).toContain("429");
+		const diagnostic = events[0].error.errorMessage;
+		// pi-subagents' broader fallback-model classifier keys on "provider" and
+		// "unavailable" (or bare "upstream") appearing together in the failure
+		// text, so it can still pick a configured `fallbackModels` entry here.
+		expect(diagnostic).toMatch(/provider/i);
+		expect(diagnostic).toMatch(/unavailable/i);
+		expect(diagnostic).toMatch(/upstream/i);
+		// The diagnostic must NOT contain "429", "rate limit", or "overloaded":
+		// our own bounded retry budget is already exhausted, and pi-ai's native
+		// `isRetryableAssistantError` would otherwise auto-retry the whole turn
+		// again with its own exponential backoff, compounding into a visible
+		// duplicate-notice loop on top of our own retries.
+		expect(diagnostic).not.toContain("429");
+		expect(diagnostic).not.toMatch(/rate.?limit/i);
+		expect(diagnostic).not.toMatch(/overloaded/i);
+		expect(isRetryableAssistantError(events[0].error)).toBe(false);
 	});
 
 	test("uses fallback 429 classification once and ends aborted during recovery", async () => {
@@ -1378,6 +1393,135 @@ test("does not let a 400 body containing 429 override the HTTP status", async ()
 
 	expect(attempts).toBe(1);
 	expect(events[0]).toMatchObject({ type: "error", reason: "error" });
+});
+
+test("bounds a persistent overload so pi-subagents can select a fallback model", async () => {
+	let attempts = 0;
+	const limiter = {
+		getState() {
+			return undefined;
+		},
+		async wait() {},
+		recordFailure() {},
+		recordSuccess() {
+			return false;
+		},
+	};
+	const api = () => ({
+		streamSimple(_model, _context, options) {
+			attempts += 1;
+			return (async function* () {
+				await options.onResponse?.({ status: 503, headers: {} }, model);
+			})();
+		},
+	});
+
+	const events = await collect(
+		rateLimitedStream(api, limiter, undefined, {
+			overloadMaxAttempts: 2,
+			retryDelayMs: 0,
+		})(model, context),
+	);
+
+	expect(attempts).toBe(2);
+	expect(events).toHaveLength(1);
+	expect(events[0]).toMatchObject({ type: "error", reason: "error" });
+	const diagnostic = events[0].error.errorMessage;
+	// Same rationale as the 429 case above: pi-subagents' fallback-model
+	// classifier keys on "provider"/"unavailable"/"upstream", while pi-ai's
+	// native `isRetryableAssistantError` must not treat our own exhausted
+	// retry budget as an invitation to retry the turn again itself.
+	expect(diagnostic).toMatch(/provider/i);
+	expect(diagnostic).toMatch(/unavailable/i);
+	expect(diagnostic).toMatch(/upstream/i);
+	expect(diagnostic).not.toMatch(/overloaded/i);
+	expect(diagnostic).not.toMatch(/\b5\d\d\b/);
+	expect(isRetryableAssistantError(events[0].error)).toBe(false);
+});
+
+test("suppresses an identical forced notice repeated across a bounded overload retry burst", async () => {
+	let attempts = 0;
+	const limiter = {
+		getState() {
+			return undefined;
+		},
+		async wait() {},
+		recordFailure() {},
+		recordSuccess() {
+			return false;
+		},
+	};
+	const api = () => ({
+		streamSimple(_model, _context, options) {
+			attempts += 1;
+			return (async function* () {
+				await options.onResponse?.({ status: 503, headers: {} }, model);
+			})();
+		},
+	});
+	const notices = [];
+	const notify = (message, level) => notices.push({ message, level });
+
+	await collect(
+		rateLimitedStream(api, limiter, notify, {
+			overloadMaxAttempts: 3,
+			retryDelayMs: 0,
+		})(model, context),
+	);
+
+	expect(attempts).toBe(3);
+	// Every attempt calls `display(..., "error", true)` with the identical
+	// interim notice; only the first reaches `notify`, and the exhausted
+	// terminal diagnostic no longer duplicates it through a matching toast
+	// (the transcript already shows that exact text via the pushed error).
+	expect(notices).toEqual([
+		{
+			message: "OpenLimits: servidores saturados; reintentando en 5s\u2026",
+			level: "info",
+		},
+	]);
+});
+
+test("still displays a different forced notice immediately after a suppressed repeat", async () => {
+	let attempts = 0;
+	const limiter = {
+		getState() {
+			return undefined;
+		},
+		async wait() {},
+		recordFailure() {},
+		recordSuccess() {
+			return false;
+		},
+	};
+	const api = () => ({
+		streamSimple(_model, _context, options) {
+			attempts += 1;
+			return (async function* () {
+				if (attempts === 1) {
+					await options.onResponse?.({ status: 503, headers: {} }, model);
+					return;
+				}
+				await options.onResponse?.({ status: 200, headers: {} }, model);
+				yield* successEvents();
+			})();
+		},
+	});
+	const notices = [];
+	const notify = (message, level) => notices.push({ message, level });
+
+	await collect(
+		rateLimitedStream(api, limiter, notify, {
+			overloadMaxAttempts: 2,
+			retryDelayMs: 0,
+		})(model, context),
+	);
+
+	expect(attempts).toBe(2);
+	expect(notices.map((entry) => entry.message)).toEqual([
+		"OpenLimits: servidores saturados; reintentando en 5s\u2026",
+		"OpenLimits: conexi\u00f3n recuperada.",
+	]);
 });
 
 test("forwards a complete tool call, including done, so Pi can execute it and continue", async () => {
