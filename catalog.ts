@@ -38,6 +38,17 @@ const GPT_56_RESPONSES_TLM = {
   max: "max",
 } as const;
 
+// GPT-6 Astra has no `none` effort; Pi's off level is therefore unsupported.
+const GPT_6_RESPONSES_TLM = {
+  off: null,
+  minimal: "low",
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  max: "max",
+} as const;
+
 const CHAT_TLM = {
   off: "none",
   minimal: "low",
@@ -165,10 +176,22 @@ export const ANTHROPIC_MODELS = [
   },
 ] satisfies ProviderModelConfig[];
 
-// OpenLimits accepts approximately 920K input tokens for GPT-5.6 and
-// rejects requests above the documented 922K input ceiling. With the 128K
-// output budget, that is the published 1.05M total context window.
+// OpenAI documents a 1.05M total context window (922K input + 128K output)
+// for GPT-6 Astra and GPT-5.6. OpenLimits completed a live Astra request at
+// approximately 450K input tokens and rejected a 922K input request with the
+// provider's native context-window error.
 export const RESPONSES_MODELS = [
+  {
+    id: "gpt-6-astra",
+    name: "GPT-6 Astra (OpenLimits)",
+    reasoning: true,
+    input: ["text", "image"],
+    contextWindow: 1_050_000,
+    maxTokens: 128_000,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    thinkingLevelMap: { ...GPT_6_RESPONSES_TLM },
+    compat: { ...RESPONSES_COMPAT },
+  },
   {
     id: "gpt-5.6-sol",
     name: "GPT-5.6 Sol (OpenLimits)",
@@ -406,13 +429,14 @@ function defaultsForLiveId(
     // OpenAI-style completions for the GPT family: emit reasoning_effort at
     // top level (default compat branch in pi-ai), use max_completion_tokens,
     // and force reasoning_content replay so multi-turn thinking stays wired.
-    if (short.startsWith("gpt-5.6-")) {
+    if (short === "gpt-6-astra" || short.startsWith("gpt-5.6-")) {
       return {
         ...FAMILY_DEFAULTS.chat,
         input: ["text", "image"],
-        contextWindow: 372_000,
+        contextWindow: 1_050_000,
         maxTokens: 128_000,
-        thinkingLevelMap: GPT_56_CHAT_TLM,
+        thinkingLevelMap:
+          short === "gpt-6-astra" ? GPT_6_RESPONSES_TLM : GPT_56_CHAT_TLM,
         compat: GPT_CHAT_COMPAT,
       };
     }

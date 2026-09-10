@@ -29,6 +29,25 @@ describe("OpenAI Responses reasoning levels", () => {
     },
   );
 
+  test("GPT-6 Astra exposes its 1.05M window and supported efforts", () => {
+    const model = RESPONSES_MODELS.find(
+      (candidate) => candidate.id === "gpt-6-astra",
+    );
+
+    expect(model).toBeDefined();
+    expect(model?.contextWindow).toBe(1_050_000);
+    expect(model?.maxTokens).toBe(128_000);
+    expect(model?.thinkingLevelMap).toMatchObject({
+      off: null,
+      minimal: "low",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+    });
+  });
+
   test("older GPT models expose native off/xhigh without max", () => {
     const model = RESPONSES_MODELS.find(
       (candidate) => candidate.id === "gpt-5.5",
@@ -136,6 +155,7 @@ describe("catalog compatibility", () => {
 describe("live catalog", () => {
   const ids = [
     "anthropic/claude-sonnet-5",
+    "openai/gpt-6-astra",
     "openai/gpt-5.6-sol",
     "z-ai/glm-5.2",
     "minimax/minimax-m3",
@@ -146,12 +166,13 @@ describe("live catalog", () => {
   test("partitions every supported family", () => {
     expect(partitionModelIds(ids)).toEqual({
       anthropic: ["anthropic/claude-sonnet-5"],
-      responses: ["openai/gpt-5.6-sol"],
+      responses: ["openai/gpt-5.6-sol", "openai/gpt-6-astra"],
       chat: [
         "deepseek/deepseek-v4-pro",
         "minimax/minimax-future",
         "minimax/minimax-m3",
         "openai/gpt-5.6-sol",
+        "openai/gpt-6-astra",
         "z-ai/glm-5.2",
       ],
     });
@@ -159,6 +180,7 @@ describe("live catalog", () => {
 
   test("openai/* IDs surface in the chat bucket with their static metadata", () => {
     const live = [
+      "openai/gpt-6-astra",
       "openai/gpt-5.6-sol",
       "openai/gpt-5.6-terra",
       "openai/gpt-5.6-luna",
@@ -169,6 +191,11 @@ describe("live catalog", () => {
     ];
     const chat = modelsForLiveIds("chat", live);
     const byId = Object.fromEntries(chat.map((m) => [m.id, m]));
+
+    expect(byId["gpt-6-astra"].contextWindow).toBe(1_050_000);
+    expect(byId["gpt-6-astra"].maxTokens).toBe(128_000);
+    expect(byId["gpt-6-astra"].thinkingLevelMap.off).toBeNull();
+    expect(byId["gpt-6-astra"].thinkingLevelMap.max).toBe("max");
 
     expect(byId["gpt-5.6-sol"].contextWindow).toBe(1_050_000);
     expect(byId["gpt-5.6-sol"].maxTokens).toBe(128_000);
@@ -187,11 +214,15 @@ describe("live catalog", () => {
   });
 
   test("preserves legacy short IDs for Claude and GPT", () => {
-    expect(modelsForLiveIds("anthropic", [ids[0]])[0].id).toBe(
+    expect(modelsForLiveIds("anthropic", ["anthropic/claude-sonnet-5"])[0].id).toBe(
       "claude-sonnet-5",
     );
-    expect(modelsForLiveIds("responses", [ids[1]])[0].id).toBe("gpt-5.6-sol");
-    expect(modelsForLiveIds("chat", [ids[3]])[0].id).toBe("minimax/minimax-m3");
+    expect(modelsForLiveIds("responses", ["openai/gpt-5.6-sol"])[0].id).toBe(
+      "gpt-5.6-sol",
+    );
+    expect(modelsForLiveIds("chat", ["minimax/minimax-m3"])[0].id).toBe(
+      "minimax/minimax-m3",
+    );
   });
 
   test("uses long-context metadata for live Claude Opus 5", () => {
