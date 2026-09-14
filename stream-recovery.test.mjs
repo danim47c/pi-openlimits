@@ -45,6 +45,8 @@ function rateLimitError() {
 
 const openAI401ErrorMessage =
 	'OpenAI API error (401): {"message":"The request could not be processed.","type":"authentication_error","param":null,"code":401}';
+const openAI409ErrorMessage =
+	'OpenAI API error (409): {"message":"The request could not be processed.","type":"conflict","param":null,"code":409}';
 
 function openAI401Error() {
 	return {
@@ -54,6 +56,18 @@ function openAI401Error() {
 			role: "assistant",
 			stopReason: "error",
 			errorMessage: openAI401ErrorMessage,
+		},
+	};
+}
+
+function openAI409Error() {
+	return {
+		type: "error",
+		reason: "error",
+		error: {
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: openAI409ErrorMessage,
 		},
 	};
 }
@@ -385,6 +399,36 @@ describe("rateLimitedStream 429 recovery", () => {
 			recordedFailures: 3,
 			waitedForFourthRequest: true,
 		});
+		expect(events.map((event) => event.type)).toEqual([
+			"start",
+			"text_delta",
+			"done",
+		]);
+		expect(events.some((event) => event.type === "error")).toBe(false);
+	});
+
+	test("retries the OpenAI SDK 409 conflict until recovery", async () => {
+		let attempts = 0;
+		const api = () => ({
+			streamSimple() {
+				const attempt = attempts++;
+				return (async function* () {
+					if (attempt < 2) {
+						yield openAI409Error();
+						return;
+					}
+					yield* successEvents();
+				})();
+			},
+		});
+
+		const events = await collect(
+			rateLimitedStream(api, immediateLimiter(), undefined, {
+				retryDelayMs: 0,
+			})(model, context),
+		);
+
+		expect(attempts).toBe(3);
 		expect(events.map((event) => event.type)).toEqual([
 			"start",
 			"text_delta",

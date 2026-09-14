@@ -59,20 +59,22 @@ status before steering, interrupting, or relaunching it.
   5 s backoff (`OpenLimits: servidores saturados, overload (intento N);
   reintentando en Xs…`).
 - The OpenAI SDK-formatted `OpenAI API error (401): {"…","type":"authentication_error",…}`
-  that OpenLimits occasionally emits on an otherwise-valid session is treated
-  as a transient upstream blip on the OpenAI routes only. It rides the same
-  5 s overload circuit, never surfaces as a credential diagnostic to Pi, and
-  any other 401 phrasing (Anthropic, custom OpenLimits gate, malformed keys)
-  still terminates the attempt so a real failure stays visible.
+  and `OpenAI API error (409): {"…","type":"conflict",…}` errors that
+  OpenLimits occasionally emits on an otherwise-valid session are treated as
+  transient upstream blips on the OpenAI routes only. They ride the same 5 s
+  overload circuit and never surface as terminal diagnostics to Pi. Any other
+  401/409 phrasing (Anthropic, custom OpenLimits gate, malformed keys, or a
+  different request conflict) still terminates the attempt so a real failure
+  stays visible.
 - Finite budgets remain available for tests or intentionally bounded
   integrations through `EmptyResponseRetryPolicy.rateLimitMaxAttempts` /
   `overloadMaxAttempts`. Leaving them unset is the production default.
 
 ## Notice noise and bounded-fallback diagnostic
 
-The provider retries 429, the exact OpenAI SDK 401 authentication failure,
-and 5xx failures forever (or until cancellation / a finite budget) and emits a
-notice per attempt so the user can see the stream
+The provider retries 429, the exact OpenAI SDK 401 authentication and 409
+conflict failures, and 5xx failures forever (or until cancellation / a finite
+budget) and emits a notice per attempt so the user can see the stream
 is still alive. That keeps the run observable without producing a visually
 broken loop of identical toasts.
 

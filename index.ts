@@ -1062,7 +1062,8 @@ export function rateLimitedStream(
 						const canUseBodyFallback =
 							responseStatus === undefined ||
 							isSuccessfulHttpStatus(responseStatus) ||
-							(responseStatus === 401 && isOpenAI401Text(eventError?.errorMessage));
+							(responseStatus !== undefined &&
+								isOpenAITransientText(eventError?.errorMessage, responseStatus));
 						const effectiveEventKind = canUseBodyFallback ? eventKind : undefined;
 						if (effectiveEventKind && responseTransient === undefined) {
 							responseTransient = effectiveEventKind;
@@ -1334,13 +1335,14 @@ function classifyTransientEvent(
 	// Real OpenLimits rate limit phrasing (e.g. "429 {"…","type":"rate_limit_error",…}" or "429 The request could not be processed.").
 	if (provider.startsWith("openlimits") && isOpenLimitsRateLimitText(text))
 		return "rate_limit";
-	// The OpenAI SDK-formatted `OpenAI API error (401): {"…","type":"authentication_error",…}`
-	// surfaces an upstream 401 that recovers seconds later. We only classify
-	// the exact OpenAI phrasing so a real credential diagnostic still aborts.
+	// The OpenAI SDK-formatted transient errors (`OpenAI API error (401)` with
+	// `authentication_error` or `OpenAI API error (409)` with `conflict`) can
+	// recover seconds later. We only classify the exact OpenAI phrasing so a
+	// real credential or request diagnostic still aborts.
 	if (
 		provider.startsWith("openlimits") &&
 		api.startsWith("openai-") &&
-		isOpenAI401Text(text)
+		isOpenAITransientText(text)
 	)
 		return "overloaded";
 	if (/servers? (?:are )?currently overloaded|overloaded/i.test(text))
@@ -1380,17 +1382,26 @@ function isOpenLimitsRateLimitText(text: string): boolean {
 }
 
 /**
- * Detect the specific OpenAI SDK-formatted 401 (`OpenAI API error (401):
- * {"...","type":"authentication_error",...}`) that OpenLimits can return on
- * an otherwise-valid session. The body must look exactly like the OpenAI
- * SDK error so we never mask a real Anthropic or OpenLimits gate rejection.
+ * Detect the specific OpenAI SDK-formatted transient errors that OpenLimits
+ * can return on an otherwise-valid session. The status, error type, and code
+ * must agree so a real Anthropic or OpenLimits gate rejection is not masked.
  */
-function isOpenAI401Text(text: unknown): boolean {
+function isOpenAITransientText(text: unknown, expectedStatus?: number): boolean {
 	if (typeof text !== "string") return false;
+	const statusMatch = text.match(
+		/^\s*OpenAI API error\s*\((401|409)\)(?::|$)/i,
+	);
+	if (!statusMatch) return false;
+	const status = Number(statusMatch[1]);
+	if (expectedStatus !== undefined && status !== expectedStatus) return false;
+	if (status === 401)
+		return (
+			/"type"\s*:\s*"authentication_error"/i.test(text) &&
+			/"code"\s*:\s*401\b/i.test(text)
+		);
 	return (
-		/^\s*OpenAI API error\s*\(401\)(?::|$)/i.test(text) &&
-		/"type"\s*:\s*"authentication_error"/i.test(text) &&
-		/"code"\s*:\s*401\b/i.test(text)
+		/"type"\s*:\s*"conflict"/i.test(text) &&
+		/"code"\s*:\s*409\b/i.test(text)
 	);
 }
 
