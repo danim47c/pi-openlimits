@@ -214,9 +214,9 @@ describe("live catalog", () => {
   });
 
   test("preserves legacy short IDs for Claude and GPT", () => {
-    expect(modelsForLiveIds("anthropic", ["anthropic/claude-sonnet-5"])[0].id).toBe(
-      "claude-sonnet-5",
-    );
+    expect(
+      modelsForLiveIds("anthropic", ["anthropic/claude-sonnet-5"])[0].id,
+    ).toBe("claude-sonnet-5");
     expect(modelsForLiveIds("responses", ["openai/gpt-5.6-sol"])[0].id).toBe(
       "gpt-5.6-sol",
     );

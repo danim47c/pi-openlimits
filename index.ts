@@ -118,8 +118,14 @@ function enforceOpenLimitsReasoningEffort(
  */
 export const EMPTY_RESPONSE_RETRY_MS = 5_000;
 export const EMPTY_RESPONSE_MAX_ATTEMPTS = 3;
-/** Do not keep a subagent in a retry loop forever when a quota is exhausted. */
-export const TRANSIENT_MAX_ATTEMPTS = 3;
+/**
+ * Retry transient OpenLimits failures until recovery or cancellation.
+ *
+ * A finite value can still be supplied through EmptyResponseRetryPolicy for
+ * deterministic tests or an explicitly bounded integration, but production
+ * provider streams must not stop after an arbitrary burst of transient errors.
+ */
+export const TRANSIENT_MAX_ATTEMPTS = Number.POSITIVE_INFINITY;
 /**
  * OpenLimits can answer an oversized Chat Completions request with HTTP 200 and
  * an empty `done` event instead of returning a context-window error. Once the
@@ -166,9 +172,15 @@ export type EmptyResponseRetryPolicy = {
 	maxAttempts?: number;
 	/** Delay between invalid HTTP 2xx attempts. */
 	retryDelayMs?: number;
-	/** Maximum rate-limit attempts before handing the provider error to Pi. */
+	/**
+	 * Optional finite rate-limit retry budget. Omit to retry until recovery or
+	 * cancellation.
+	 */
 	rateLimitMaxAttempts?: number;
-	/** Maximum overload attempts before handing the provider error to Pi. */
+	/**
+	 * Optional finite overload retry budget. Omit to retry until recovery or
+	 * cancellation.
+	 */
 	overloadMaxAttempts?: number;
 	/** Interval for no-op stream heartbeats; zero disables them in tests/tools. */
 	progressHeartbeatMs?: number;
@@ -816,10 +828,14 @@ export function rateLimitedStream(
 							1,
 							Math.ceil((waiting.blockedUntil - Date.now()) / 1_000),
 						);
+						const nextAttempt =
+							waiting.kind === "rate_limit"
+								? rateLimitAttempts + 1
+								: overloadAttempts + 1;
 						display(
 							waiting.kind === "rate_limit"
-								? `OpenLimits: rate limit en esta sesión; reintentando en ${seconds}s…`
-								: `OpenLimits: servidores saturados; reintentando en ${seconds}s…`,
+								? `OpenLimits: rate limit; esperando ${seconds}s para el reintento ${nextAttempt}…`
+								: `OpenLimits: servidores saturados; esperando ${seconds}s para el reintento ${nextAttempt}…`,
 						);
 					}
 					await recovery.wait(sessionId, options?.signal);
@@ -870,10 +886,20 @@ export function rateLimitedStream(
 								? sanitizeDiagnosticText(sample, 200)
 								: undefined,
 						);
+						const blockedUntil = recovery.getState(sessionId)?.blockedUntil;
+						const delayMs =
+							blockedUntil === undefined
+								? Math.max(5_000, retryAfterMs ?? 0)
+								: Math.max(0, blockedUntil - Date.now());
+						const seconds = Math.max(1, Math.ceil(delayMs / 1_000));
+						const attemptLabel =
+							kind === "rate_limit"
+								? `rate limit (intento ${rateLimitAttempts})`
+								: `overload (intento ${overloadAttempts})`;
 						display(
 							kind === "rate_limit"
-								? "OpenLimits: rate limit en esta sesión; esperando 60s…"
-								: "OpenLimits: servidores saturados; reintentando en 5s…",
+								? `OpenLimits: ${attemptLabel}; reintentando en ${seconds}s…`
+								: `OpenLimits: servidores saturados, ${attemptLabel}; reintentando en ${seconds}s…`,
 							"info",
 							true,
 						);
@@ -1034,7 +1060,9 @@ export function rateLimitedStream(
 							? classifyTransientEvent(eventError, model.provider, model.api)
 							: undefined;
 						const canUseBodyFallback =
-							responseStatus === undefined || isSuccessfulHttpStatus(responseStatus);
+							responseStatus === undefined ||
+							isSuccessfulHttpStatus(responseStatus) ||
+							(responseStatus === 401 && isOpenAI401Text(eventError?.errorMessage));
 						const effectiveEventKind = canUseBodyFallback ? eventKind : undefined;
 						if (effectiveEventKind && responseTransient === undefined) {
 							responseTransient = effectiveEventKind;
@@ -1118,31 +1146,19 @@ export function rateLimitedStream(
 					if (!validResponse && options?.signal?.aborted) throw abortError();
 					const transientAttemptsExhausted =
 						(responseTransient === "rate_limit" &&
+							Number.isFinite(rateLimitMaxAttempts) &&
 							rateLimitAttempts >= rateLimitMaxAttempts) ||
 						(responseTransient === "overloaded" &&
+							Number.isFinite(overloadMaxAttempts) &&
 							overloadAttempts >= overloadMaxAttempts);
 					if (transientAttemptsExhausted && !validResponse && !terminalError) {
 						const kind = responseTransient ?? "overloaded";
 						const attempts =
 							kind === "rate_limit" ? rateLimitAttempts : overloadAttempts;
-						// Deliberately worded to stay outside pi-ai's own
-						// `isRetryableAssistantError` vocabulary (no "rate limit", "429",
-						// "overloaded", or 5xx digits): this diagnostic is our *final*
-						// word after our own bounded, circuit-aware retry budget is
-						// already exhausted, so Pi's generic native auto-retry must not
-						// layer its own blind exponential-backoff retry on top (that
-						// produced the exact repeated "servidores saturados" / "Error:
-						// ... remained overloaded" noise this wording avoids). It still
-						// contains "provider"/"unavailable"/"upstream" so pi-subagents'
-						// broader fallback-model classifier can select a configured
-						// `fallbackModels` entry for the *next* run.
 						const diagnostic =
 							kind === "rate_limit"
 								? `OpenLimits upstream provider stayed unavailable for this session after ${attempts} attempts of repeated request throttling; retry later or use a fallback model.`
 								: `OpenLimits upstream provider stayed unavailable for this session after ${attempts} attempts of repeated upstream failures; retry later or use a fallback model.`;
-						// The terminal assistant message pushed below already carries this
-						// exact diagnostic and Pi renders it in the transcript; a matching
-						// toast would only repeat the same line a second time.
 						emitPartialStreamError(diagnostic);
 					}
 					const invalidSuccessfulStream =
@@ -1318,6 +1334,15 @@ function classifyTransientEvent(
 	// Real OpenLimits rate limit phrasing (e.g. "429 {"…","type":"rate_limit_error",…}" or "429 The request could not be processed.").
 	if (provider.startsWith("openlimits") && isOpenLimitsRateLimitText(text))
 		return "rate_limit";
+	// The OpenAI SDK-formatted `OpenAI API error (401): {"…","type":"authentication_error",…}`
+	// surfaces an upstream 401 that recovers seconds later. We only classify
+	// the exact OpenAI phrasing so a real credential diagnostic still aborts.
+	if (
+		provider.startsWith("openlimits") &&
+		api.startsWith("openai-") &&
+		isOpenAI401Text(text)
+	)
+		return "overloaded";
 	if (/servers? (?:are )?currently overloaded|overloaded/i.test(text))
 		return "overloaded";
 	if (provider.startsWith("openlimits") && /(?<!\d)5\d\d(?!\d)/.test(text))
@@ -1352,6 +1377,21 @@ function isOpenLimitsRateLimitText(text: string): boolean {
 	// Once the leading status is 429, the HTTP status is authoritative; body
 	// wording is useful evidence but must not be required for recovery.
 	return true;
+}
+
+/**
+ * Detect the specific OpenAI SDK-formatted 401 (`OpenAI API error (401):
+ * {"...","type":"authentication_error",...}`) that OpenLimits can return on
+ * an otherwise-valid session. The body must look exactly like the OpenAI
+ * SDK error so we never mask a real Anthropic or OpenLimits gate rejection.
+ */
+function isOpenAI401Text(text: unknown): boolean {
+	if (typeof text !== "string") return false;
+	return (
+		/^\s*OpenAI API error\s*\(401\)(?::|$)/i.test(text) &&
+		/"type"\s*:\s*"authentication_error"/i.test(text) &&
+		/"code"\s*:\s*401\b/i.test(text)
+	);
 }
 
 function isValidDoneEvent(event: unknown): boolean {

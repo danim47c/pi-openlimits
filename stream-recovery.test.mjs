@@ -43,6 +43,21 @@ function rateLimitError() {
 	};
 }
 
+const openAI401ErrorMessage =
+	'OpenAI API error (401): {"message":"The request could not be processed.","type":"authentication_error","param":null,"code":401}';
+
+function openAI401Error() {
+	return {
+		type: "error",
+		reason: "error",
+		error: {
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: openAI401ErrorMessage,
+		},
+	};
+}
+
 function successEvents() {
 	const partial = { role: "assistant", content: [] };
 	const message = {
@@ -76,6 +91,89 @@ function fakeApi(attempts) {
 }
 
 describe("rateLimitedStream 429 recovery", () => {
+	test("keeps retrying a persistent 429 every 5 s until it recovers", async () => {
+		const attempts = [];
+		const limiter = {
+			acquires: 0,
+			recorded429: 0,
+			waitedForFourthRequest: false,
+			getState() {
+				return undefined;
+			},
+			async wait() {
+				this.acquires += 1;
+				if (this.acquires === 4) this.waitedForFourthRequest = true;
+			},
+			recordFailure() {
+				this.recorded429 += 1;
+			},
+			recordSuccess() {
+				return false;
+			},
+		};
+		const responses = [];
+		const events = [];
+		for await (const event of rateLimitedStream(
+			fakeApi(attempts),
+			limiter,
+			undefined,
+			{
+				rateLimitRetryDelayMs: 0,
+			},
+		)(model, context, {
+			onResponse: (response) => responses.push(response.status),
+		}))
+			events.push(event);
+
+		expect(attempts).toHaveLength(4);
+		expect(responses).toEqual([429, 429, 429, 200]);
+		expect(limiter).toMatchObject({
+			acquires: 4,
+			recorded429: 3,
+			waitedForFourthRequest: true,
+		});
+		expect(events.map((event) => event.type)).toEqual([
+			"start",
+			"text_delta",
+			"done",
+		]);
+		expect(events.some((event) => event.type === "error")).toBe(false);
+	});
+
+	test("keeps retrying a persistent 429 until the budget is explicitly bounded", async () => {
+		let attempts = 0;
+		const limiter = {
+			getState() {
+				return undefined;
+			},
+			async wait() {},
+			recordFailure() {},
+			recordSuccess() {
+				return false;
+			},
+		};
+		const api = () => ({
+			streamSimple(_model, _context, options) {
+				attempts += 1;
+				return (async function* () {
+					await options.onResponse?.({ status: 429, headers: {} }, model);
+					yield rateLimitError();
+				})();
+			},
+		});
+
+		const events = await collect(
+			rateLimitedStream(api, limiter, undefined, {
+				rateLimitMaxAttempts: 5,
+				rateLimitRetryDelayMs: 0,
+			})(model, context),
+		);
+
+		expect(attempts).toBe(5);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ type: "error", reason: "error" });
+	});
+
 	test("hides initial 429 attempts, waits before the fourth request, and forwards recovery", async () => {
 		const attempts = [];
 		const limiter = {
@@ -230,6 +328,198 @@ describe("rateLimitedStream 429 recovery", () => {
 			reason: "aborted",
 			error: { stopReason: "aborted" },
 		});
+	});
+
+	test("retries a persistent OpenAI SDK 401 every 5 s until recovery", async () => {
+		const attempts = [];
+		const limiter = {
+			acquires: 0,
+			recordedFailures: 0,
+			waitedForFourthRequest: false,
+			getState() {
+				return undefined;
+			},
+			async wait() {
+				this.acquires += 1;
+				if (this.acquires === 4) this.waitedForFourthRequest = true;
+			},
+			recordFailure() {
+				this.recordedFailures += 1;
+			},
+			recordSuccess() {
+				return false;
+			},
+		};
+		const api = () => ({
+			streamSimple(_model, _context, options) {
+				const attempt = attempts.length;
+				attempts.push(options);
+				return (async function* () {
+					if (attempt < 3) {
+						await options.onResponse?.({ status: 401, headers: {} }, model);
+						yield openAI401Error();
+						return;
+					}
+					await options.onResponse?.({ status: 200, headers: {} }, model);
+					yield* successEvents();
+				})();
+			},
+		});
+		const responses = [];
+		const events = [];
+		for await (const event of rateLimitedStream(api, limiter, undefined, {
+			rateLimitRetryDelayMs: 0,
+		})(model, context, {
+			onResponse: (response) => responses.push(response.status),
+		}))
+			events.push(event);
+
+		expect(attempts).toHaveLength(4);
+		expect(responses).toEqual([401, 401, 401, 200]);
+		// The OpenAI SDK 401 goes through the overload circuit (a 5 s backoff
+		// rather than the longer rate-limit pause, since auth retries usually
+		// recover within a few seconds). Pi never sees the credential-shaped
+		// partial attempts as a finished assistant error.
+		expect(limiter).toMatchObject({
+			acquires: 4,
+			recordedFailures: 3,
+			waitedForFourthRequest: true,
+		});
+		expect(events.map((event) => event.type)).toEqual([
+			"start",
+			"text_delta",
+			"done",
+		]);
+		expect(events.some((event) => event.type === "error")).toBe(false);
+	});
+
+	test("retries a 401 surface via a 200 SDK error event", async () => {
+		const attempts = [];
+		const limiter = {
+			getState() {
+				return undefined;
+			},
+			async wait() {},
+			recordFailure() {},
+			recordSuccess() {
+				return false;
+			},
+		};
+		const api = () => ({
+			streamSimple(_model, _context, options) {
+				const attempt = attempts.length;
+				attempts.push(options);
+				return (async function* () {
+					if (attempt < 2) {
+						// The OpenAI SDK only reports the 401 once it sees the error
+						// body, so the response.status can be 200 (status gate) while
+						// the eventual stream payload carries the 401 message.
+						await options.onResponse?.({ status: 200, headers: {} }, model);
+						yield openAI401Error();
+						return;
+					}
+					await options.onResponse?.({ status: 200, headers: {} }, model);
+					yield* successEvents();
+				})();
+			},
+		});
+
+		const events = [];
+		for await (const event of rateLimitedStream(api, limiter, undefined, {
+			retryDelayMs: 0,
+		})(model, context))
+			events.push(event);
+
+		expect(attempts).toHaveLength(3);
+		expect(events.map((event) => event.type)).toEqual([
+			"start",
+			"text_delta",
+			"done",
+		]);
+		expect(events.some((event) => event.type === "error")).toBe(false);
+	});
+
+	test("does not retry a 401 that does not match the OpenAI SDK phrasing", async () => {
+		let attempts = 0;
+		const limiter = immediateLimiter();
+		const api = () => ({
+			streamSimple(_model, _context, options) {
+				attempts += 1;
+				return (async function* () {
+					await options.onResponse?.(
+						{
+							status: 401,
+							headers: {},
+						},
+						model,
+					);
+					yield {
+						type: "error",
+						reason: "error",
+						error: {
+							role: "assistant",
+							stopReason: "error",
+							errorMessage: "Anthropic API error (401): invalid x-api-key",
+						},
+					};
+				})();
+			},
+		});
+
+		const events = await collect(rateLimitedStream(api, limiter)(model, context));
+
+		// A non-OpenAI SDK 401 is a real credential diagnostic: surface it
+		// immediately rather than masking the failure behind a transient retry.
+		expect(attempts).toBe(1);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ type: "error", reason: "error" });
+		expect(events[0].error.errorMessage).toMatch(/invalid x-api-key/);
+	});
+
+	test("bounds a persistent OpenAI 401 so pi-subagents can select a fallback model", async () => {
+		let attempts = 0;
+		const limiter = {
+			getState() {
+				return undefined;
+			},
+			async wait() {},
+			recordFailure() {},
+			recordSuccess() {
+				return false;
+			},
+		};
+		const api = () => ({
+			streamSimple(_model, _context, options) {
+				attempts += 1;
+				return (async function* () {
+					await options.onResponse?.({ status: 401, headers: {} }, model);
+					yield openAI401Error();
+				})();
+			},
+		});
+
+		const events = await collect(
+			rateLimitedStream(api, limiter, undefined, {
+				overloadMaxAttempts: 2,
+				retryDelayMs: 0,
+			})(model, context),
+		);
+
+		expect(attempts).toBe(2);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ type: "error", reason: "error" });
+		const diagnostic = events[0].error.errorMessage;
+		expect(diagnostic).toMatch(/provider/i);
+		expect(diagnostic).toMatch(/unavailable/i);
+		expect(diagnostic).toMatch(/upstream/i);
+		// Same wording contract as the 429/5xx exhaustion diagnostics: keep
+		// "401" out of the terminal message so pi-ai's own auto-retry layer
+		// does not double-loop on top of our exhausted budget.
+		expect(diagnostic).not.toContain("401");
+		expect(diagnostic).not.toMatch(/rate.?limit/i);
+		expect(diagnostic).not.toMatch(/overloaded/i);
+		expect(diagnostic).not.toMatch(/authentication/i);
+		expect(isRetryableAssistantError(events[0].error)).toBe(false);
 	});
 });
 
@@ -1427,10 +1717,8 @@ test("bounds a persistent overload so pi-subagents can select a fallback model",
 	expect(events).toHaveLength(1);
 	expect(events[0]).toMatchObject({ type: "error", reason: "error" });
 	const diagnostic = events[0].error.errorMessage;
-	// Same rationale as the 429 case above: pi-subagents' fallback-model
-	// classifier keys on "provider"/"unavailable"/"upstream", while pi-ai's
-	// native `isRetryableAssistantError` must not treat our own exhausted
-	// retry budget as an invitation to retry the turn again itself.
+	// A finite policy remains available as an explicit escape hatch for tests
+	// and integrations that deliberately want a bounded transient retry budget.
 	expect(diagnostic).toMatch(/provider/i);
 	expect(diagnostic).toMatch(/unavailable/i);
 	expect(diagnostic).toMatch(/upstream/i);
@@ -1439,7 +1727,7 @@ test("bounds a persistent overload so pi-subagents can select a fallback model",
 	expect(isRetryableAssistantError(events[0].error)).toBe(false);
 });
 
-test("suppresses an identical forced notice repeated across a bounded overload retry burst", async () => {
+test("shows each transient retry attempt to the user", async () => {
 	let attempts = 0;
 	const limiter = {
 		getState() {
@@ -1470,13 +1758,20 @@ test("suppresses an identical forced notice repeated across a bounded overload r
 	);
 
 	expect(attempts).toBe(3);
-	// Every attempt calls `display(..., "error", true)` with the identical
-	// interim notice; only the first reaches `notify`, and the exhausted
-	// terminal diagnostic no longer duplicates it through a matching toast
-	// (the transcript already shows that exact text via the pushed error).
 	expect(notices).toEqual([
 		{
-			message: "OpenLimits: servidores saturados; reintentando en 5s\u2026",
+			message:
+				"OpenLimits: servidores saturados, overload (intento 1); reintentando en 5s\u2026",
+			level: "info",
+		},
+		{
+			message:
+				"OpenLimits: servidores saturados, overload (intento 2); reintentando en 5s\u2026",
+			level: "info",
+		},
+		{
+			message:
+				"OpenLimits: servidores saturados, overload (intento 3); reintentando en 5s\u2026",
 			level: "info",
 		},
 	]);
@@ -1519,7 +1814,7 @@ test("still displays a different forced notice immediately after a suppressed re
 
 	expect(attempts).toBe(2);
 	expect(notices.map((entry) => entry.message)).toEqual([
-		"OpenLimits: servidores saturados; reintentando en 5s\u2026",
+		"OpenLimits: servidores saturados, overload (intento 1); reintentando en 5s\u2026",
 		"OpenLimits: conexi\u00f3n recuperada.",
 	]);
 });

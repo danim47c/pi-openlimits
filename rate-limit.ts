@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 /** The minimum time a shared OpenLimits circuit stays open after a 429. */
-export const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 60_000;
+export const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 5_000;
 const LOCK_RETRY_MS = 25;
 const LOCK_STALE_MS = 1_000;
 const LOCK_WAIT_MS = 250;
@@ -59,7 +59,11 @@ export function isOpenLimitsRateLimit(
 		typeof candidate.errorMessage !== "string"
 	)
 		return false;
-	if (provider && candidate.provider !== undefined && candidate.provider !== provider)
+	if (
+		provider &&
+		candidate.provider !== undefined &&
+		candidate.provider !== provider
+	)
 		return false;
 	if (api && candidate.api !== undefined && candidate.api !== api) return false;
 	const text = candidate.errorMessage;
@@ -87,10 +91,13 @@ function parseState(value: string): RateLimitState {
 			openUntil: Math.max(0, state.openUntil),
 			probeUntil: Math.max(0, state.probeUntil),
 			retryAfterMs:
-				typeof state.retryAfterMs === "number" && Number.isFinite(state.retryAfterMs)
+				typeof state.retryAfterMs === "number" &&
+				Number.isFinite(state.retryAfterMs)
 					? Math.max(0, state.retryAfterMs)
 					: 0,
-			...(typeof state.probeOwner === "string" ? { probeOwner: state.probeOwner } : {}),
+			...(typeof state.probeOwner === "string"
+				? { probeOwner: state.probeOwner }
+				: {}),
 		};
 	} catch {
 		return { ...EMPTY_STATE };
@@ -125,7 +132,8 @@ export class OpenLimitsRateLimiter {
 	private readonly now: () => number;
 	private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
 	private readonly cooldownMs: number;
-	private readonly instanceId = `${process.pid}.${Math.random().toString(36).slice(2)}`;
+	private readonly instanceId =
+		`${process.pid}.${Math.random().toString(36).slice(2)}`;
 	private readonly ownedProbeTokens = new Set<string>();
 
 	constructor(
@@ -227,7 +235,8 @@ export class OpenLimitsRateLimiter {
 		if (!probeToken) probeToken = this.ownedProbeTokens.values().next().value;
 		await this.update((state, now) => {
 			if (probeToken && state.probeOwner === probeToken) return { ...EMPTY_STATE };
-			if (state.openUntil <= now && state.probeUntil <= now) return { ...EMPTY_STATE };
+			if (state.openUntil <= now && state.probeUntil <= now)
+				return { ...EMPTY_STATE };
 			return state;
 		}, signal);
 		if (probeToken) this.ownedProbeTokens.delete(probeToken);
@@ -332,10 +341,7 @@ export class OpenLimitsRateLimiter {
 
 	private async recoverStaleLock(): Promise<void> {
 		try {
-			const lockStat = await this.bounded(
-				stat(this.lockPath),
-				LOCK_WAIT_MS,
-			);
+			const lockStat = await this.bounded(stat(this.lockPath), LOCK_WAIT_MS);
 			if (Date.now() - lockStat.mtimeMs < LOCK_STALE_MS) return;
 			let owner: string | undefined;
 			try {
@@ -347,10 +353,14 @@ export class OpenLimitsRateLimiter {
 				// A lock without an owner is recoverable after the stale interval.
 			}
 			const ownerPid = Number(owner?.split(".")[0]);
-			if (Number.isInteger(ownerPid) && ownerPid > 0 && isProcessAlive(ownerPid)) return;
+			if (Number.isInteger(ownerPid) && ownerPid > 0 && isProcessAlive(ownerPid))
+				return;
 			const recoveredPath = `${this.lockPath}.stale.${process.pid}.${Math.random().toString(36).slice(2)}`;
 			await this.bounded(rename(this.lockPath, recoveredPath), LOCK_WAIT_MS);
-			await this.bounded(rm(recoveredPath, { recursive: true, force: true }), LOCK_WAIT_MS);
+			await this.bounded(
+				rm(recoveredPath, { recursive: true, force: true }),
+				LOCK_WAIT_MS,
+			);
 		} catch {
 			// Another process won the race or the filesystem is unavailable.
 		}
@@ -367,7 +377,10 @@ export class OpenLimitsRateLimiter {
 		}
 	}
 
-	private async writeState(state: RateLimitState, signal?: AbortSignal): Promise<void> {
+	private async writeState(
+		state: RateLimitState,
+		signal?: AbortSignal,
+	): Promise<void> {
 		const temporary = `${this.statePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
 		try {
 			await this.bounded(

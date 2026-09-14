@@ -45,55 +45,58 @@ status before steering, interrupting, or relaunching it.
 
 ## Rate-limit and overload behaviour
 
-- HTTP 429s from OpenLimits are retried up to three times and pause the
-  affected session for 60 s (or a longer `Retry-After`). After the budget the
-  provider surfaces a rate-limit error so `pi-subagents` can select a fallback
-  model.
+- HTTP 429s from OpenLimits are retried indefinitely while the session stays
+  alive. Each attempt pauses the affected session for at least 5 s (or a
+  longer `Retry-After`) and surfaces a per-attempt notice so the user can see
+  the stream is still alive (`OpenLimits: rate limit (intento N); reintentando
+  en Xs…`). Cancellation always wins; an aborted request returns
+  `stopReason: "aborted"` and never retries.
 - A file-backed circuit at `~/.pi/agent/openlimits-rate-limit-circuit.json`
   coordinates independent subagent processes. The shared limiter opens on
-  the first 429 and permits only one half-open probe.
-- 5xx / `overloaded` responses retry every five seconds, also up to three
-  times.
+  the first 429, permits only one half-open probe, and uses a 5 s floor so
+  every subagent process retries on the same short cadence.
+- 5xx / `overloaded` responses follow the same indefinite loop with a fixed
+  5 s backoff (`OpenLimits: servidores saturados, overload (intento N);
+  reintentando en Xs…`).
+- The OpenAI SDK-formatted `OpenAI API error (401): {"…","type":"authentication_error",…}`
+  that OpenLimits occasionally emits on an otherwise-valid session is treated
+  as a transient upstream blip on the OpenAI routes only. It rides the same
+  5 s overload circuit, never surfaces as a credential diagnostic to Pi, and
+  any other 401 phrasing (Anthropic, custom OpenLimits gate, malformed keys)
+  still terminates the attempt so a real failure stays visible.
+- Finite budgets remain available for tests or intentionally bounded
+  integrations through `EmptyResponseRetryPolicy.rateLimitMaxAttempts` /
+  `overloadMaxAttempts`. Leaving them unset is the production default.
 
-## Exhausted-retry diagnostics and notice noise
+## Notice noise and bounded-fallback diagnostic
 
-When the bounded rate-limit/overload retry budget is exhausted, the provider
-surfaces exactly one terminal assistant error, worded to avoid a specific
-failure mode: Pi core's own generic auto-retry (`AgentSession._prepareRetry`,
-driven by `isRetryableAssistantError` from `@earendil-works/pi-ai`) treats any
-assistant error containing words like "rate limit", "429", "overloaded", or a
-5xx digit sequence as retryable and transparently retries the *whole turn*
-again with its own exponential backoff (`baseDelayMs * 2^attempt`, default 3
-attempts). Layering that generic retry on top of this provider's own
-circuit-aware retry is redundant — blind, unaware of the shared rate-limit
-circuit, and it is what previously produced a visibly repeating "OpenLimits:
-servidores saturados…" / "Error: … remained overloaded…" loop that looked like
-a stuck run.
+The provider retries 429, the exact OpenAI SDK 401 authentication failure,
+and 5xx failures forever (or until cancellation / a finite budget) and emits a
+notice per attempt so the user can see the stream
+is still alive. That keeps the run observable without producing a visually
+broken loop of identical toasts.
 
-The exhausted diagnostic therefore:
+A *terminal* assistant error is only emitted when the operator has capped the
+budget through `EmptyResponseRetryPolicy.rateLimitMaxAttempts` /
+`overloadMaxAttempts` (the production default leaves both unset, so this
+branch is unreachable). When that path is exercised, the diagnostic is
+worded to stay outside pi-ai's own `isRetryableAssistantError` vocabulary (no
+"rate limit", "429", "overloaded", or 5xx digits) so Pi core's blind
+exponential-backoff retry does not layer on top. The diagnostic still says
+the upstream provider is unavailable so `pi-subagents`' broader
+fallback-model classifier can act on it, and it is only shown through the
+terminal assistant message (not duplicated through `notify()`).
 
-- never contains "rate limit", "429", "overloaded", or 5xx digits, so Pi core's
-  `isRetryableAssistantError` returns `false` and does not auto-retry the turn;
-- still contains "provider" and "unavailable" (and the bare word "upstream"),
-  matching `pi-subagents`' broader `isRetryableModelFailure` classifier, so a
-  configured `fallbackModels` entry can still be selected for the *next* run;
-- is only shown once, through the terminal assistant message that Pi renders
-  in the transcript. The provider does not additionally push it through
-  `notify()`, which previously duplicated the exact same line as a toast.
+The interim notice for each in-flight retry attempt includes the attempt
+counter and the remaining backoff seconds so the user always sees progress:
 
-Separately, an *interim* notice (`"OpenLimits: servidores saturados;
-reintentando en 5s…"` or the rate-limit equivalent) fires once per retry
-attempt while the budget is not yet exhausted. Because a bounded burst can
-repeat the identical state on every attempt, an exact repeat of the previous
-notice text within `NOTICE_REPEAT_SUPPRESS_MS` (15 s) is swallowed even though
-these notices are otherwise forced past the normal 9 s de-dup window. A
-genuinely different message — a new countdown, a different failure kind, or
-recovery — always displays immediately.
+- `OpenLimits: rate limit (intento N); reintentando en Xs…`
+- `OpenLimits: servidores saturados, overload (intento N); reintentando en Xs…`
+- `OpenLimits: rate limit; esperando Xs para el reintento N…`
 
-If you author a NEW terminal diagnostic in this provider, keep it out of
-pi-ai's `RETRYABLE_PROVIDER_ERROR_PATTERN` vocabulary once our own retry
-budget is already exhausted, or Pi will invisibly retry the whole turn again
-and reproduce the same noise this section describes.
+Each new attempt refreshes the counter, so identical text never repeats
+inside the same backoff window. The notice is suppressed only when nothing
+about the state has changed.
 
 ## Diagnostic logs (off by default for events, on for empty/429)
 

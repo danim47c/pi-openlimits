@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	utimes,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -49,7 +56,7 @@ describe("OpenLimits rate limit circuit breaker", () => {
 		await first.record429();
 		await expectAbort((signal) => second.acquire(signal));
 		const state = await persistedState(first.statePath);
-		expect(state.openUntil).toBe(61_000);
+		expect(state.openUntil).toBe(6_000);
 	});
 
 	test("resets the consecutive 429 count after a non-429 failure", async () => {
@@ -120,7 +127,9 @@ describe("OpenLimits rate limit circuit breaker", () => {
 		directories.push(directory);
 		const parent = join(directory, "not-a-directory");
 		await writeFile(parent, "x");
-		const limiter = new OpenLimitsRateLimiter({ statePath: join(parent, "state.json") });
+		const limiter = new OpenLimitsRateLimiter({
+			statePath: join(parent, "state.json"),
+		});
 		await expect(limiter.record429()).resolves.toBeUndefined();
 		await expect(limiter.recordSuccess()).resolves.toBeUndefined();
 		await expect(limiter.acquire()).resolves.toEqual({});
@@ -139,10 +148,13 @@ describe("OpenLimits rate limit circuit breaker", () => {
 			errorMessage: "429 The request could not be processed.",
 		};
 		expect(isOpenLimitsRateLimit(observed)).toBe(true);
-		expect(isOpenLimitsRateLimit({
-			...observed,
-			errorMessage: '429: {"message":"The request could not be processed.","type":"rate_limit_error","code":429}',
-		})).toBe(true);
+		expect(
+			isOpenLimitsRateLimit({
+				...observed,
+				errorMessage:
+					'429: {"message":"The request could not be processed.","type":"rate_limit_error","code":429}',
+			}),
+		).toBe(true);
 		expect(
 			isOpenLimitsRateLimit({
 				...observed,
