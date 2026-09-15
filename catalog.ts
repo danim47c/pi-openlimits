@@ -177,16 +177,20 @@ export const ANTHROPIC_MODELS = [
 ] satisfies ProviderModelConfig[];
 
 // OpenAI documents a 1.05M total context window (922K input + 128K output)
-// for GPT-6 Astra and GPT-5.6. OpenLimits completed a live Astra request at
-// approximately 450K input tokens and rejected a 922K input request with the
-// provider's native context-window error.
+// for GPT-6 Astra and GPT-5.6, but switches to long-context pricing above
+// 272K input tokens. Keep the advertised working window at that cutoff for
+// models where predictable cost matters; the upstream physical limit remains
+// larger. OpenLimits completed a live Astra request at approximately 450K
+// input tokens and rejected a 922K input request with the native overflow.
+const COST_SAFE_CONTEXT_WINDOW = 272_000;
+
 export const RESPONSES_MODELS = [
   {
     id: "gpt-6-astra",
     name: "GPT-6 Astra (OpenLimits)",
     reasoning: true,
     input: ["text", "image"],
-    contextWindow: 1_050_000,
+    contextWindow: COST_SAFE_CONTEXT_WINDOW,
     maxTokens: 128_000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     thinkingLevelMap: { ...GPT_6_RESPONSES_TLM },
@@ -197,7 +201,7 @@ export const RESPONSES_MODELS = [
     name: "GPT-5.6 Sol (OpenLimits)",
     reasoning: true,
     input: ["text", "image"],
-    contextWindow: 1_050_000,
+    contextWindow: COST_SAFE_CONTEXT_WINDOW,
     maxTokens: 128_000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     thinkingLevelMap: { ...GPT_56_RESPONSES_TLM },
@@ -433,7 +437,10 @@ function defaultsForLiveId(
       return {
         ...FAMILY_DEFAULTS.chat,
         input: ["text", "image"],
-        contextWindow: 1_050_000,
+        contextWindow:
+          short === "gpt-6-astra" || short === "gpt-5.6-sol"
+            ? COST_SAFE_CONTEXT_WINDOW
+            : 1_050_000,
         maxTokens: 128_000,
         thinkingLevelMap:
           short === "gpt-6-astra" ? GPT_6_RESPONSES_TLM : GPT_56_CHAT_TLM,

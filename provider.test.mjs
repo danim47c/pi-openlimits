@@ -235,6 +235,7 @@ describe("provider registration", () => {
       allowNetwork: false,
     });
 
+    expect(models[0].contextWindow).toBe(272_000);
     expect(models[0].compat).toMatchObject({
       maxTokensField: "max_completion_tokens",
       supportsReasoningEffort: true,

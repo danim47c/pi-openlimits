@@ -16,7 +16,9 @@ describe("OpenAI Responses reasoning levels", () => {
       const model = RESPONSES_MODELS.find((candidate) => candidate.id === id);
 
       expect(model).toBeDefined();
-      expect(model?.contextWindow).toBe(1_050_000);
+      expect(model?.contextWindow).toBe(
+        id === "gpt-5.6-sol" ? 272_000 : 1_050_000,
+      );
       expect(model?.thinkingLevelMap).toMatchObject({
         off: "none",
         minimal: "low",
@@ -29,13 +31,13 @@ describe("OpenAI Responses reasoning levels", () => {
     },
   );
 
-  test("GPT-6 Astra exposes its 1.05M window and supported efforts", () => {
+  test("GPT-6 Astra exposes the cost-safe 272K working window", () => {
     const model = RESPONSES_MODELS.find(
       (candidate) => candidate.id === "gpt-6-astra",
     );
 
     expect(model).toBeDefined();
-    expect(model?.contextWindow).toBe(1_050_000);
+    expect(model?.contextWindow).toBe(272_000);
     expect(model?.maxTokens).toBe(128_000);
     expect(model?.thinkingLevelMap).toMatchObject({
       off: null,
@@ -192,12 +194,12 @@ describe("live catalog", () => {
     const chat = modelsForLiveIds("chat", live);
     const byId = Object.fromEntries(chat.map((m) => [m.id, m]));
 
-    expect(byId["gpt-6-astra"].contextWindow).toBe(1_050_000);
+    expect(byId["gpt-6-astra"].contextWindow).toBe(272_000);
     expect(byId["gpt-6-astra"].maxTokens).toBe(128_000);
     expect(byId["gpt-6-astra"].thinkingLevelMap.off).toBeNull();
     expect(byId["gpt-6-astra"].thinkingLevelMap.max).toBe("max");
 
-    expect(byId["gpt-5.6-sol"].contextWindow).toBe(1_050_000);
+    expect(byId["gpt-5.6-sol"].contextWindow).toBe(272_000);
     expect(byId["gpt-5.6-sol"].maxTokens).toBe(128_000);
     expect(byId["gpt-5.6-sol"].input).toEqual(["text", "image"]);
     expect(byId["gpt-5.6-sol"].thinkingLevelMap.max).toBe("max");

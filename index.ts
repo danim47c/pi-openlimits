@@ -1705,16 +1705,21 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
 				({ provider: _provider, ...model }) => model as ProviderModelConfig,
 			);
 			const pricingOverrides = loadPricingOverrides();
-			// Refresh persisted GPT metadata from the Chat model list so caches written
-			// before the compat/pricing fixes cannot suppress reasoning_effort or
-			// leave the footer with a stale all-zero cost.
+			// Refresh persisted static metadata so caches written before catalog
+			// changes cannot suppress reasoning compatibility, retain stale context
+			// windows, or leave the footer with an all-zero cost.
 			const normalizedCachedModels = cachedModels?.map((model) => {
 				const staticModel =
 					family === "chat"
 						? OPENLIMITS_CHAT_MODELS.find((candidate) => candidate.id === model.id)
-						: undefined;
+						: family === "responses"
+							? staticModels.find((candidate) => candidate.id === model.id)
+							: undefined;
 				return {
 					...model,
+					...(staticModel?.contextWindow === undefined
+						? {}
+						: { contextWindow: staticModel.contextWindow }),
 					cost: resolveModelPricing(model.id, family, pricingOverrides),
 					...(family === "chat"
 						? {
