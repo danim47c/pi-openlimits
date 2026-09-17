@@ -69,6 +69,17 @@ status before steering, interrupting, or relaunching it.
 - Finite budgets remain available for tests or intentionally bounded
   integrations through `EmptyResponseRetryPolicy.rateLimitMaxAttempts` /
   `overloadMaxAttempts`. Leaving them unset is the production default.
+- HTTP 2xx streams that close cleanly but emit no assistant content
+  (`empty_stream`, `reasoning_only`, or `truncated_stream` per the diagnostic
+  log below) are treated the same way as 429 and 5xx: the attempt is retried
+  indefinitely on the same 5 s cadence so a transient empty stream from a
+  warming-up model does not stall a Pi session. The unbounded default lives
+  in `EMPTY_RESPONSE_MAX_ATTEMPTS = Number.POSITIVE_INFINITY`; pass a finite
+  `EmptyResponseRetryPolicy.maxAttempts` only when you explicitly need a
+  bounded integration. Cancellation, the orchestrator's `timeoutMs`, and the
+  pi-subagents Watchdog are the only ways to break the wait. The diagnostic
+  log records `maxAttempts: "unbounded"` for every such attempt so the
+  effective budget is always visible.
 
 ## Notice noise and bounded-fallback diagnostic
 
@@ -80,8 +91,9 @@ broken loop of identical toasts.
 
 A *terminal* assistant error is only emitted when the operator has capped the
 budget through `EmptyResponseRetryPolicy.rateLimitMaxAttempts` /
-`overloadMaxAttempts` (the production default leaves both unset, so this
-branch is unreachable). When that path is exercised, the diagnostic is
+`overloadMaxAttempts` / `maxAttempts` (the production default leaves all
+three unset, so this branch is unreachable). When that path is exercised, the
+diagnostic is
 worded to stay outside pi-ai's own `isRetryableAssistantError` vocabulary (no
 "rate limit", "429", "overloaded", or 5xx digits) so Pi core's blind
 exponential-backoff retry does not layer on top. The diagnostic still says

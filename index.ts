@@ -113,11 +113,22 @@ function enforceOpenLimitsReasoningEffort(
 
 /**
  * A successful HTTP response that never yields a usable assistant message is
- * not recoverable by retrying forever. Keep this budget deliberately small so
- * a broken upstream cannot hold a Pi session in streaming state indefinitely.
+ * recoverable by retrying the same way 429 and 5xx are: an OpenLimits upstream
+ * can return HTTP 200 with a truncated body (`empty_stream`,
+ * `reasoning_only`, `truncated_stream`) while the model is warming up or
+ * recovering from an incident, and Pi's session will see the stream close
+ * cleanly with no usable content. Treat those outcomes like the rate-limit
+ * and overload loops and retry forever until recovery or cancellation so a
+ * single bad stream cannot wedge a Pi session.
+ *
+ * Cancellation, the orchestrator's `timeoutMs`, and pi-subagents' Watchdog
+ * remain the only ways to break the wait, exactly as for 429/5xx. A finite
+ * budget can still be supplied through `EmptyResponseRetryPolicy.maxAttempts`
+ * for deterministic tests or an intentionally bounded integration; the
+ * production default is unbounded.
  */
 export const EMPTY_RESPONSE_RETRY_MS = 5_000;
-export const EMPTY_RESPONSE_MAX_ATTEMPTS = 3;
+export const EMPTY_RESPONSE_MAX_ATTEMPTS = Number.POSITIVE_INFINITY;
 /**
  * Retry transient OpenLimits failures until recovery or cancellation.
  *
@@ -309,7 +320,8 @@ type EmptyResponseEvidence = {
 	baseUrl?: string;
 	outcome: "empty_stream" | "reasoning_only" | "truncated_stream";
 	durationMs: number;
-	maxAttempts: number;
+	/** Effective invalid-response budget; `"unbounded"` mirrors the production default. */
+	maxAttempts: number | "unbounded";
 	retryDelayMs: number;
 	response?: {
 		status: number;
@@ -951,10 +963,12 @@ export function rateLimitedStream(
 							...(safeBaseUrl(model.baseUrl)
 								? { baseUrl: safeBaseUrl(model.baseUrl) }
 								: {}),
-							outcome,
-							durationMs: Date.now() - attemptStartedAt,
-							maxAttempts: emptyResponseMaxAttempts,
-							retryDelayMs: emptyResponseRetryDelayMs,
+outcome,
+						durationMs: Date.now() - attemptStartedAt,
+						maxAttempts: Number.isFinite(emptyResponseMaxAttempts)
+							? emptyResponseMaxAttempts
+							: "unbounded",
+						retryDelayMs: emptyResponseRetryDelayMs,
 							...(responseEvidence ? { response: responseEvidence } : {}),
 							...(payloadEvidence ? { payload: payloadEvidence } : {}),
 							events: eventEvidence,
@@ -1386,11 +1400,12 @@ function isOpenLimitsRateLimitText(text: string): boolean {
  * can return on an otherwise-valid session. The status, error type, and code
  * must agree so a real Anthropic or OpenLimits gate rejection is not masked.
  */
-function isOpenAITransientText(text: unknown, expectedStatus?: number): boolean {
+function isOpenAITransientText(
+	text: unknown,
+	expectedStatus?: number,
+): boolean {
 	if (typeof text !== "string") return false;
-	const statusMatch = text.match(
-		/^\s*OpenAI API error\s*\((401|409)\)(?::|$)/i,
-	);
+	const statusMatch = text.match(/^\s*OpenAI API error\s*\((401|409)\)(?::|$)/i);
 	if (!statusMatch) return false;
 	const status = Number(statusMatch[1]);
 	if (expectedStatus !== undefined && status !== expectedStatus) return false;
@@ -1400,8 +1415,7 @@ function isOpenAITransientText(text: unknown, expectedStatus?: number): boolean 
 			/"code"\s*:\s*401\b/i.test(text)
 		);
 	return (
-		/"type"\s*:\s*"conflict"/i.test(text) &&
-		/"code"\s*:\s*409\b/i.test(text)
+		/"type"\s*:\s*"conflict"/i.test(text) && /"code"\s*:\s*409\b/i.test(text)
 	);
 }
 
