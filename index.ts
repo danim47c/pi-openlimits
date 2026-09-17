@@ -130,6 +130,17 @@ function enforceOpenLimitsReasoningEffort(
 export const EMPTY_RESPONSE_RETRY_MS = 5_000;
 export const EMPTY_RESPONSE_MAX_ATTEMPTS = Number.POSITIVE_INFINITY;
 /**
+ * Maximum number of *consecutive identical* invalid-response diagnostics the
+ * provider writes to `~/.pi/agent/openlimits-empty-responses.jsonl` per
+ * session before suppressing further copies of the same signature. The
+ * suppression lifts as soon as the payload, response status/headers, outcome,
+ * or event count changes, so the next genuinely different attempt is always
+ * recorded. Five gives an operator enough evidence to confirm a sustained
+ * incident without flooding the log when the default retry budget is now
+ * unbounded.
+ */
+export const EMPTY_RESPONSE_DIAGNOSTIC_REPEAT_LIMIT = 5;
+/**
  * Retry transient OpenLimits failures until recovery or cancellation.
  *
  * A finite value can still be supplied through EmptyResponseRetryPolicy for
@@ -576,6 +587,41 @@ function summarizeRecoveryState(state: unknown): RateLimitEvidence["recovery"] {
 }
 
 function recordEmptyResponseEvidence(evidence: EmptyResponseEvidence): void {
+	// A repeated truncation that yields the same payload, response, and event
+	// shape every retry is a single sustained incident, not five new findings.
+	// Suppress the diagnostic after EMPTY_RESPONSE_DIAGNOSTIC_REPEAT_LIMIT
+	// identical writes per session so a long retry loop cannot flood the log,
+	// and resume writing as soon as the signature changes (a different status,
+	// header, payload, outcome, or event count). A successful response clears
+	// the memory so a later recurrence of the same incident logs from scratch.
+	const signature = emptyResponseSignature(evidence);
+	const last = emptyResponseSignatureMemory.get(evidence.sessionId);
+	if (last?.signature === signature) {
+		last.repeatCount += 1;
+		if (last.repeatCount <= EMPTY_RESPONSE_DIAGNOSTIC_REPEAT_LIMIT) {
+			void appendEmptyResponseEvidence(evidence);
+		}
+		return;
+	}
+	if (
+		emptyResponseSignatureMemory.size >=
+		EMPTY_RESPONSE_SIGNATURE_MEMORY_LIMIT
+	) {
+		const oldest = emptyResponseSignatureMemory.keys().next().value;
+		if (oldest !== undefined) emptyResponseSignatureMemory.delete(oldest);
+	}
+	emptyResponseSignatureMemory.set(evidence.sessionId, {
+		signature,
+		repeatCount: 1,
+	});
+	void appendEmptyResponseEvidence(evidence);
+}
+
+function clearEmptyResponseSignature(sessionId: string): void {
+	emptyResponseSignatureMemory.delete(sessionId);
+}
+
+function appendEmptyResponseEvidence(evidence: EmptyResponseEvidence): void {
 	void (async () => {
 		try {
 			await mkdir(dirname(emptyResponseLogPath()), { recursive: true });
@@ -586,6 +632,55 @@ function recordEmptyResponseEvidence(evidence: EmptyResponseEvidence): void {
 			// Diagnostics must never interrupt or close the Pi stream.
 		}
 	})();
+}
+
+type EmptyResponseSignatureEntry = {
+	signature: string;
+	repeatCount: number;
+};
+const emptyResponseSignatureMemory = new Map<
+	string,
+	EmptyResponseSignatureEntry
+>();
+/**
+ * Upper bound on tracked sessions. Long-lived hosts only create one entry per
+ * distinct session id, but a leaked caller could grow the map without limit;
+ * evicting the oldest entry keeps the memory bounded with worst-case
+ * behaviour equal to today's always-log diagnostic.
+ */
+const EMPTY_RESPONSE_SIGNATURE_MEMORY_LIMIT = 256;
+
+/**
+ * Stable fingerprint of an invalid-response attempt that ignores fields that
+ * legitimately change on every retry (`timestamp`, `attemptNumber`,
+ * `durationMs`). Two attempts share a signature when they target the same
+ * payload shape, response status/headers, outcome, and event count.
+ */
+function emptyResponseSignature(evidence: EmptyResponseEvidence): string {
+	const payload = evidence.payload;
+	const response = evidence.response;
+	const eventCountBucket =
+		evidence.eventCount >= 8 ? "8+" : String(evidence.eventCount);
+	return JSON.stringify({
+		provider: evidence.provider,
+		model: evidence.model,
+		api: evidence.api,
+		outcome: evidence.outcome,
+		retryDelayMs: evidence.retryDelayMs,
+		maxAttempts: evidence.maxAttempts,
+		payloadKeys: payload?.keys ?? null,
+		payloadMessageCount: payload?.messageCount ?? null,
+		responseStatus: response?.status ?? null,
+		responseHeaderKeys:
+			response?.headers === undefined
+				? null
+				: Object.keys(response.headers).sort(),
+		responseRetryAfterMs: response?.retryAfterMs ?? null,
+		eventCountBucket,
+		estimatedContextTokens: evidence.estimatedContextTokens ?? null,
+		contextWindow: evidence.contextWindow ?? null,
+		likelyContextOverflow: evidence.likelyContextOverflow ?? false,
+	});
 }
 
 function recordRateLimitEvidence(evidence: RateLimitEvidence): void {
@@ -1252,6 +1347,9 @@ outcome,
 						// eventual successful stream; never retry after this terminal event.
 						shouldRetry = false;
 						const globallyRecovered = recovery.recordSuccess(sessionId);
+						// Drop any pending suppression memory for this session so the next
+						// recurrence of the same incident logs from the first attempt again.
+						clearEmptyResponseSignature(sessionId);
 						if (wasRecovering)
 							display("OpenLimits: conexión recuperada.", "info", true);
 						else if (globallyRecovered)

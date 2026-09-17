@@ -608,6 +608,25 @@ async function diagnosticLines(path, minimum = 1) {
 	);
 }
 
+async function waitForDiagnosticCount(path, predicate, minimum) {
+	for (let attempt = 0; attempt < 100; attempt += 1) {
+		try {
+			const lines = (await readFile(path, "utf8"))
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line))
+				.filter(predicate);
+			if (lines.length >= minimum) return lines;
+		} catch {
+			// The best-effort writer may not have created the file yet.
+		}
+		await Bun.sleep(5);
+	}
+	throw new Error(
+		`Timed out waiting for ${minimum} matching diagnostic line(s) in ${path}`,
+	);
+}
+
 test("persists safe HTTP 429 evidence with response correlation metadata", async () => {
 	let attempts = 0;
 	const limiter = {
@@ -1896,4 +1915,97 @@ test("forwards a complete tool call, including done, so Pi can execute it and co
 		"done",
 	]);
 	expect(events.at(-1)).toMatchObject({ type: "done", reason: "toolUse" });
+});
+
+test("suppresses identical invalid-response diagnostics after five repeats and resumes on signature change", async () => {
+	let requests = 0;
+	const sessionId = `diagnostic-repeat-${diagnosticNonce}`;
+	const api = () => ({
+		streamSimple(_model, _context, options) {
+			const attempt = requests++;
+			return (async function* () {
+				const headers =
+					attempt === 10 ? { "x-request-id": "req-changed" } : {};
+				await options.onResponse?.({ status: 200, headers }, model);
+				if (attempt === 11) {
+					yield* successEvents();
+					return;
+				}
+				yield {
+					type: "done",
+					reason: "stop",
+					message: { role: "assistant", content: [], stopReason: "stop" },
+				};
+			})();
+		},
+	});
+
+	await collect(
+		rateLimitedStream(api, immediateLimiter(), undefined, {
+			retryDelayMs: 0,
+		})(model, context, { sessionId }),
+	);
+	// The session produces six diagnostics: attempts 1..5 of the sustained
+	// incident plus the signature change on attempt 11. Wait until those six
+	// lines are flushed, ignoring any diagnostics a prior test already wrote.
+	const records = await waitForDiagnosticCount(
+		testDiagnosticsPath,
+		(entry) => entry.sessionId === sessionId,
+		6,
+	);
+
+	// Attempts 1..5 logged; 6..10 suppressed; attempt 11's changed header is
+	// logged again. The final attempt succeeds and clears suppression memory.
+	expect(requests).toBe(12);
+	expect(records).toHaveLength(6);
+	expect(
+		records.filter(
+			(entry) => entry.response?.headers?.["x-request-id"] === "req-changed",
+		),
+	).toHaveLength(1);
+	expect(records.at(-1).response?.headers?.["x-request-id"]).toBe("req-changed");
+});
+
+test("resets suppression memory after a successful response so the next incident logs from attempt one", async () => {
+	let requests = 0;
+	const sessionId = `diagnostic-reset-${diagnosticNonce}`;
+	const api = () => ({
+		streamSimple(_model, _context, options) {
+			const attempt = requests++;
+			return (async function* () {
+				await options.onResponse?.({ status: 200, headers: {} }, model);
+				if (attempt === 5) {
+					yield* successEvents();
+					return;
+				}
+				yield {
+					type: "done",
+					reason: "stop",
+					message: { role: "assistant", content: [], stopReason: "stop" },
+				};
+			})();
+		},
+	});
+
+	// Five invalid attempts (logged), then attempt 6 succeeds and clears the
+	// suppression memory. A seventh identical failure must log again from 1.
+	await collect(
+		rateLimitedStream(api, immediateLimiter(), undefined, {
+			retryDelayMs: 0,
+		})(model, context, { sessionId }),
+	);
+	await collect(
+		rateLimitedStream(api, immediateLimiter(), undefined, {
+			maxAttempts: 1,
+			retryDelayMs: 0,
+		})(model, context, { sessionId }),
+	);
+	const records = await waitForDiagnosticCount(
+		testDiagnosticsPath,
+		(entry) => entry.sessionId === sessionId,
+		6,
+	);
+
+	expect(requests).toBe(7);
+	expect(records).toHaveLength(6);
 });
