@@ -122,6 +122,13 @@ about the state has changed.
 - `~/.pi/agent/openlimits-empty-responses.jsonl` — invalid HTTP 2xx streams
   that the provider classified as `empty_stream`, `reasoning_only`, or
   `truncated_stream`. Override path with `OPENLIMITS_EMPTY_RESPONSE_LOG`.
+  The writer keeps the first five consecutive records with the same stable
+  signature per session, suppresses further identical copies during the
+  sustained incident, and resumes logging when the payload/response/outcome
+  signature changes. A successful assistant response clears the suppression
+  memory, so a later recurrence is recorded from its first attempt. The
+  effective production retry budget is serialized as `maxAttempts:
+  "unbounded"` rather than JSON `null`.
 - `~/.pi/agent/openlimits-recovered/` — timestamps marking when a probe
   observed recovery, used to gate the next request after a 429.
 
