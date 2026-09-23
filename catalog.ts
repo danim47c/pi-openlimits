@@ -187,13 +187,10 @@ export const ANTHROPIC_MODELS = [
   },
 ] satisfies ProviderModelConfig[];
 
-// OpenAI documents a 1.05M total context window (922K input + 128K output)
-// for GPT-6 Astra and GPT-5.6, but switches to long-context pricing above
-// 272K input tokens. Keep the advertised working window at that cutoff for
-// models where predictable cost matters; the upstream physical limit remains
-// larger. OpenLimits completed a live Astra request at approximately 450K
-// input tokens and rejected a 922K input request with the native overflow.
-const COST_SAFE_CONTEXT_WINDOW = 272_000;
+// OpenAI documents a 1.05M total window (922K input + 128K output) for GPT-6
+// and GPT-5.6 models. The catalog reports the physical window; personal
+// cost-saving caps belong in the user's ~/.pi/agent/models.json
+// modelOverrides (topmost layer), not here.
 
 export const RESPONSES_MODELS = [
   {
@@ -201,7 +198,7 @@ export const RESPONSES_MODELS = [
     name: "GPT-6 Sol (OpenLimits)",
     reasoning: true,
     input: ["text", "image"],
-    contextWindow: COST_SAFE_CONTEXT_WINDOW,
+    contextWindow: 1_050_000,
     maxTokens: 128_000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     thinkingLevelMap: { ...GPT_6_RESPONSES_TLM },
@@ -212,7 +209,7 @@ export const RESPONSES_MODELS = [
     name: "GPT-6 Astra (OpenLimits)",
     reasoning: true,
     input: ["text", "image"],
-    contextWindow: COST_SAFE_CONTEXT_WINDOW,
+    contextWindow: 1_050_000,
     maxTokens: 128_000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     thinkingLevelMap: { ...GPT_6_RESPONSES_TLM },
@@ -234,7 +231,7 @@ export const RESPONSES_MODELS = [
     name: "GPT-5.6 Sol (OpenLimits)",
     reasoning: true,
     input: ["text", "image"],
-    contextWindow: COST_SAFE_CONTEXT_WINDOW,
+    contextWindow: 1_050_000,
     maxTokens: 128_000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     thinkingLevelMap: { ...GPT_56_RESPONSES_TLM },
@@ -474,12 +471,7 @@ function defaultsForLiveId(
       return {
         ...FAMILY_DEFAULTS.chat,
         input: ["text", "image"],
-        contextWindow:
-          short === "gpt-6-astra" ||
-          short === "gpt-6-sol" ||
-          short === "gpt-5.6-sol"
-            ? COST_SAFE_CONTEXT_WINDOW
-            : 1_050_000,
+        contextWindow: 1_050_000,
         maxTokens: 128_000,
         thinkingLevelMap: short.startsWith("gpt-6-")
           ? GPT_6_RESPONSES_TLM
