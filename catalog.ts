@@ -38,7 +38,7 @@ const GPT_56_RESPONSES_TLM = {
   max: "max",
 } as const;
 
-// GPT-6 Astra has no `none` effort; Pi's off level is therefore unsupported.
+// GPT-6 models have no `none` effort; Pi's off level is therefore unsupported.
 const GPT_6_RESPONSES_TLM = {
   off: null,
   minimal: "low",
@@ -108,6 +108,17 @@ const ANTHROPIC_COMPAT = {
 } as const;
 
 export const ANTHROPIC_MODELS = [
+  {
+    id: "claude-opus-5.5",
+    name: "Claude Opus 5.5 (OpenLimits)",
+    reasoning: true,
+    input: ["text", "image"],
+    contextWindow: 1_000_000,
+    maxTokens: 128_000,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    thinkingLevelMap: { ...ANTHROPIC_TLM },
+    compat: { ...ANTHROPIC_COMPAT, supportsTemperature: false },
+  },
   {
     id: "claude-opus-5",
     name: "Claude Opus 5 (OpenLimits)",
@@ -186,11 +197,33 @@ const COST_SAFE_CONTEXT_WINDOW = 272_000;
 
 export const RESPONSES_MODELS = [
   {
+    id: "gpt-6-sol",
+    name: "GPT-6 Sol (OpenLimits)",
+    reasoning: true,
+    input: ["text", "image"],
+    contextWindow: COST_SAFE_CONTEXT_WINDOW,
+    maxTokens: 128_000,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    thinkingLevelMap: { ...GPT_6_RESPONSES_TLM },
+    compat: { ...RESPONSES_COMPAT },
+  },
+  {
     id: "gpt-6-astra",
     name: "GPT-6 Astra (OpenLimits)",
     reasoning: true,
     input: ["text", "image"],
     contextWindow: COST_SAFE_CONTEXT_WINDOW,
+    maxTokens: 128_000,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    thinkingLevelMap: { ...GPT_6_RESPONSES_TLM },
+    compat: { ...RESPONSES_COMPAT },
+  },
+  {
+    id: "gpt-6-luna",
+    name: "GPT-6 Luna (OpenLimits)",
+    reasoning: true,
+    input: ["text", "image"],
+    contextWindow: 1_050_000,
     maxTokens: 128_000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     thinkingLevelMap: { ...GPT_6_RESPONSES_TLM },
@@ -433,17 +466,24 @@ function defaultsForLiveId(
     // OpenAI-style completions for the GPT family: emit reasoning_effort at
     // top level (default compat branch in pi-ai), use max_completion_tokens,
     // and force reasoning_content replay so multi-turn thinking stays wired.
-    if (short === "gpt-6-astra" || short.startsWith("gpt-5.6-")) {
+    if (
+      short === "gpt-6-astra" ||
+      short.startsWith("gpt-6-") ||
+      short.startsWith("gpt-5.6-")
+    ) {
       return {
         ...FAMILY_DEFAULTS.chat,
         input: ["text", "image"],
         contextWindow:
-          short === "gpt-6-astra" || short === "gpt-5.6-sol"
+          short === "gpt-6-astra" ||
+          short === "gpt-6-sol" ||
+          short === "gpt-5.6-sol"
             ? COST_SAFE_CONTEXT_WINDOW
             : 1_050_000,
         maxTokens: 128_000,
-        thinkingLevelMap:
-          short === "gpt-6-astra" ? GPT_6_RESPONSES_TLM : GPT_56_CHAT_TLM,
+        thinkingLevelMap: short.startsWith("gpt-6-")
+          ? GPT_6_RESPONSES_TLM
+          : GPT_56_CHAT_TLM,
         compat: GPT_CHAT_COMPAT,
       };
     }

@@ -14,8 +14,9 @@ It registers providers plus lightweight recovery hooks; it adds no slash command
 
 The Claude/Codex providers use short model IDs because the provider already implies the family:
 
-- `openlimits-claude/claude-opus-4.8`
-- `openlimits-codex/gpt-5.5`
+- `openlimits-claude/claude-opus-5.5`
+- `openlimits-claude/claude-opus-5`
+- `openlimits-codex/gpt-5.6-sol`
 - `openlimits/z-ai/glm-5.2`
 
 Display names include `(OpenLimits)`, for example `Claude Opus 4.8 (OpenLimits)`.
@@ -26,7 +27,7 @@ The provider metadata includes the compatibility tweaks needed for Pi/OpenLimits
 
 - Claude/Fable use `anthropic-messages` with `interleaved-thinking-2025-05-14` and adaptive thinking.
 - GPT/Codex use `openai-responses` with visible reasoning summaries and deferred tool-search support.
-- GPT models expose native `off`/`xhigh`; GPT-5.6 Sol/Terra/Luna additionally expose `max`.
+- GPT models expose native `off`/`xhigh`; GPT-5.6 Sol/Terra/Luna and GPT-6 Sol/Astra/Luna additionally expose `max`.
 - GLM/DeepSeek/GPT chat routes use `openai-completions` with chat-completions-compatible fields. On Pi 0.84,
   `supportsFinishReason: false` lets pi-ai finish a valid response when OpenLimits closes the SSE stream
   without a `finish_reason`; tool calls are inferred as `toolUse` and text responses as `stop`.
@@ -35,7 +36,7 @@ The provider metadata includes the compatibility tweaks needed for Pi/OpenLimits
 - OpenLimits HTTP 429s are retried internally indefinitely while the session remains alive, with a 5-second minimum pause (or a longer `Retry-After`). Overloaded/5xx responses follow the same infinite retry loop with a 5-second pause. The exact OpenAI SDK errors `OpenAI API error (401): {"…","type":"authentication_error",…}` and `OpenAI API error (409): {"…","type":"conflict",…}` on an OpenAI route are also treated as transient upstream failures and retry through the same 5-second overload circuit; other 401/409 errors remain terminal. Every transient attempt emits a visible notice containing its kind, attempt number, and next retry delay; cancellation always wins. A file-backed circuit at `~/.pi/agent/openlimits-rate-limit-circuit.json` coordinates independent subagent processes, opens on the first 429, permits only one half-open probe, and uses the same 5-second floor. Finite `rateLimitMaxAttempts` / `overloadMaxAttempts` values remain available only as an explicit test/integration override; they are not the production default. Errors that are not transient (including context overflow) retain their normal terminal/compaction handling.
 - Every observed 429 is also appended to `~/.pi/agent/openlimits-rate-limit-events.jsonl` (override with `OPENLIMITS_RATE_LIMIT_EVENTS_LOG`), including its source (`http_status` or `event_body`), parsed status/type/code/request ID when present, request/correlation headers, `Retry-After`, model/session and safe payload/event summaries. The aggregate counter remains in `~/.pi/agent/openlimits-rate-limit.json`. The OpenAI/Anthropic SDKs turn many non-2xx responses into an error event before exposing response headers; those records contain the parsed error metadata and explicitly omit headers that the SDK did not provide.
 - Content events (`text_*`, `thinking_*`, and `toolcall_*`) are buffered per attempt and published to Pi only after a valid terminal `done`. This lets a truncated/invalid 2xx stream be retried even after it produced content, without duplicating or combining partial assistant messages. Empty or start-only 2xx streams and truncations after content are retried internally every 5 seconds, up to three invalid attempts. A thinking-only response follows the same bounded retry path because it is not a complete assistant answer. If the request is already at least 90% of the declared model window, a silent invalid 2xx stream is classified as a context overflow so Pi can run its native one-shot compaction/retry; a stream that already produced content gets one retry before that hand-off. Cancellation always takes precedence: an aborted request is not classified or retried as a truncation and retains Pi's `aborted` semantics. Each invalid attempt is appended to `~/.pi/agent/openlimits-empty-responses.jsonl` (override with `OPENLIMITS_EMPTY_RESPONSE_LOG`) with status, headers, policy, payload hash/shape, bounded event summaries and a safe context-size estimate. Diagnostic files never contain API keys, prompts, tool arguments or complete payloads.
-- OpenAI's physical window for GPT-5.6 and GPT-6 Astra is 1.05M tokens (approximately 922K input plus 128K output), but requests above 272K input tokens move to the long-context price tier. To keep normal OpenLimits sessions out of the 2x input-price tier, the advertised working `contextWindow` is configured to 272K for GPT-5.6 Sol and GPT-6 Astra; their upstream physical window remains larger. GPT-5.6 Terra and Luna retain the 1.05M metadata. Live OpenLimits probes accepted approximately 920K input tokens and rejected requests above the input ceiling.
+- OpenAI's physical window for GPT-5.6 and GPT-6 is 1.05M tokens (approximately 922K input plus 128K output), but requests above 272K input tokens move to the long-context price tier. To keep normal OpenLimits sessions out of the 2x input-price tier, the advertised working `contextWindow` is configured to 272K for GPT-5.6 Sol, GPT-6 Sol, and GPT-6 Astra; their upstream physical window remains larger. GPT-5.6 Terra/Luna and GPT-6 Luna retain the 1.05M metadata. Live OpenLimits probes accepted approximately 920K input tokens and rejected requests above the input ceiling.
 - OpenLimits completed a live GPT-6 Astra request at approximately 450K input tokens and returned the native context-window error at 922K. That confirms the provider can use the larger physical window, but the catalog intentionally asks Pi to compact Sol and Astra before the 272K long-context pricing cutoff.
 - Claude Opus 5 uses its documented 1M context metadata. Because OpenLimits can return an empty HTTP 200 near its observed ~922K input ceiling, the 90% empty-response guard hands that case to Pi's native auto-compaction instead of retrying indefinitely.
 
@@ -152,7 +153,8 @@ OPENLIMITS_API_KEY=<your-openlimits-key> pi
 Then choose one of the registered models in `/model`, for example:
 
 ```text
-openlimits-codex/gpt-5.5
+openlimits-codex/gpt-6-sol
+openlimits-codex/gpt-6-luna
 openlimits-claude/claude-opus-4.8
 openlimits/z-ai/glm-5.2
 ```
