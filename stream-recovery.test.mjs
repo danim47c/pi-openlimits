@@ -1469,6 +1469,38 @@ test("discards an incomplete tool call and continues from streamed text", async 
 	]);
 });
 
+test("finalizes a complete tool call after a truncated response so Pi can execute it", async () => {
+	let attempts = 0;
+	const api = () => ({
+		streamSimple(_model, _context, options) {
+			attempts += 1;
+			return (async function* () {
+				await options.onResponse?.({ status: 200, headers: {} }, model);
+				const toolCall = { type: "toolCall", id: "tc-complete", name: "lookup", arguments: { query: "weather" } };
+				const partial = { role: "assistant", content: [toolCall] };
+				yield { type: "start", partial: { role: "assistant", content: [] } };
+				yield { type: "toolcall_start", contentIndex: 0, partial };
+				yield { type: "toolcall_delta", contentIndex: 0, delta: "{\"query\":\"weather\"}", partial };
+				yield { type: "toolcall_end", contentIndex: 0, toolCall, partial };
+			})();
+		},
+	});
+	const events = await collect(
+		rateLimitedStream(api, immediateLimiter(), undefined, { maxAttempts: 3, retryDelayMs: 0 })(model, context),
+	);
+	expect(attempts).toBe(1);
+	expect(events.map((event) => event.type)).toEqual([
+		"start", "toolcall_start", "toolcall_delta", "toolcall_end", "done",
+	]);
+	expect(events.at(-1)).toMatchObject({ reason: "toolUse", message: { stopReason: "toolUse" } });
+	expect(events.at(-1).message.content).toContainEqual({
+		type: "toolCall",
+		id: "tc-complete",
+		name: "lookup",
+		arguments: { query: "weather" },
+	});
+});
+
 test("surfaces an error when bounded continuations all truncate", async () => {
 	let attempts = 0;
 	const api = () => ({

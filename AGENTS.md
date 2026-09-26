@@ -14,14 +14,14 @@ provider.
   `text_*` / `thinking_*` / `toolcall_*` events, then a terminal `done`. A
   terminal `error` replaces `done` when recovery fails. Stream contract lives
   in `@earendil-works/pi-ai`; this provider only adds retries on top.
-- Text, thinking, and completed tool-call events are forwarded as soon as they
-  arrive; a successful response is never held back until `done`. Incomplete
-  tool-call events are held until arguments are complete, so an interrupted
-  call can be discarded without exposing a malformed call to Pi. On a truncated
-  response, the provider continues from streamed assistant content instead of
-  replaying it from the beginning; incomplete tool calls are omitted from that
-  continuation context. A continuation that cannot safely be formed ends with
-  an explicit error. A separate no-op
+- Text and thinking events are forwarded as soon as they arrive; a successful
+  response is never held back until `done`. Tool-call events are held until
+  arguments are complete. On a truncated response, incomplete tool calls are
+  discarded and omitted from continuation context; a completed call closes the
+  assistant turn with `toolUse` so Pi can execute it once. Text/thinking output
+  continues from the streamed assistant content instead of replaying it from
+  the beginning. A continuation that cannot safely be formed ends with an
+  explicit error. A separate no-op
   `thinking_delta` heartbeat may be emitted for a real Pi session; it carries
   no content and is never included in the final assistant message.
 - Cancellation always wins. An aborted request forwards `error` with

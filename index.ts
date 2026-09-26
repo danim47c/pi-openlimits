@@ -1317,6 +1317,37 @@ export function rateLimitedStream(
 					const invalidSuccessfulStream =
 						!terminalError &&
 						(invalidResponse || (!validResponse && !responseTransient));
+					const partialToolCallContent = latestPartialContent?.filter(isCompleteToolCall) ?? [];
+					if (invalidSuccessfulStream && partialToolCallContent.length > 0) {
+						// A complete tool call is actionable even if the upstream omitted its
+						// terminal marker. Close the assistant turn so Pi can execute it once;
+						// incomplete tool calls remain withheld and are handled by continuation.
+						const content = (latestPartialContent ?? []).filter(
+							(block) => block.type !== "toolCall" || isCompleteToolCall(block),
+						);
+						stream.push({
+							type: "done",
+							reason: "toolUse",
+							message: {
+								role: "assistant",
+								content,
+								api: model.api,
+								provider: model.provider,
+								model: model.id,
+								usage: {
+									input: 0,
+									output: 0,
+									cacheRead: 0,
+									cacheWrite: 0,
+									totalTokens: 0,
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+								},
+								stopReason: "toolUse",
+								timestamp: Date.now(),
+							},
+						});
+						validResponse = true;
+					}
 					if (invalidSuccessfulStream) {
 						emptyResponseAttempts += 1;
 						const emptyOutcome = classifyEmptyResponseOutcome(eventEvidence);
