@@ -1348,7 +1348,7 @@ export function rateLimitedStream(
 						});
 						validResponse = true;
 					}
-					if (invalidSuccessfulStream) {
+					if (invalidSuccessfulStream && !validResponse) {
 						emptyResponseAttempts += 1;
 						const emptyOutcome = classifyEmptyResponseOutcome(eventEvidence);
 						// Preserve the native overflow hand-off for silent near-window
