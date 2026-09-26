@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import {
 	type Api,
 	type AssistantMessage,
+	type AssistantMessageEvent,
 	anthropicMessagesApi,
 	type Context,
 	createAssistantMessageEventStream,
@@ -160,9 +161,9 @@ export const TRANSIENT_MAX_ATTEMPTS = Number.POSITIVE_INFINITY;
 export const EMPTY_RESPONSE_CONTEXT_OVERFLOW_THRESHOLD = 0.9;
 /**
  * Pi's subagent watchdog observes assistant stream events. A long upstream
- * request can otherwise look idle because response content is buffered until
- * `done` for safe retry. No-op thinking deltas keep the run observable without
- * adding text, tool calls, or persisted assistant content.
+ * request can otherwise look idle before the first provider event arrives.
+ * No-op thinking deltas keep the run observable without adding text, tool calls,
+ * or persisted assistant content.
  */
 export const STREAM_PROGRESS_HEARTBEAT_MS = 30_000;
 /**
@@ -890,6 +891,9 @@ export function rateLimitedStream(
 		let lastNoticeAt = 0;
 		let lastNoticeMessage: string | undefined;
 		let wasRecovering = false;
+		let continuationContext = context;
+		let continuedContent: AssistantMessage["content"] = [];
+		let continuationAttempts = 0;
 		// A worker can hit the same transient state on every bounded retry attempt
 		// (for example three overloaded attempts five seconds apart). Forcing an
 		// identical notice each time reads as a broken loop rather than progress,
@@ -916,6 +920,7 @@ export function rateLimitedStream(
 				/* UI must never affect recovery. */
 			}
 		};
+		let startForwarded = false;
 		const progressHeartbeat =
 			options?.sessionId === undefined
 				? undefined
@@ -959,14 +964,13 @@ export function rateLimitedStream(
 					let shouldRetry = false;
 					let invalidResponse = false;
 					let attemptProducedContent = false;
+					let attemptPublishedOutput = false;
+					let latestPartialContent: AssistantMessage["content"] | undefined;
 					const eventEvidence: Array<Record<string, unknown>> = [];
 					const eventEvidenceState = { count: 0, truncated: false };
-					// Keep every event private until this attempt has a valid terminal
-					// `done`. A provider can close a stream after emitting text or thinking;
-					// buffering is what lets us retry that attempt without duplicating a
-					// partial assistant message in Pi.
-					const bufferedEvents: Parameters<typeof stream.push>[0][] = [];
-					const estimatedContextTokens = estimateDiagnosticContextTokens(context);
+					// Forward events immediately: this provider's primary contract is a live
+					// stream. Recovery must not replay an attempt after content is visible.
+					const estimatedContextTokens = estimateDiagnosticContextTokens(continuationContext);
 					const contextWindow =
 						typeof model.contextWindow === "number" && model.contextWindow > 0
 							? model.contextWindow
@@ -1012,7 +1016,6 @@ export function rateLimitedStream(
 						);
 					};
 					const emitPartialStreamError = (errorMessage: string) => {
-						bufferedEvents.length = 0;
 						stream.push({
 							type: "error",
 							reason: "error",
@@ -1058,12 +1061,12 @@ export function rateLimitedStream(
 							...(safeBaseUrl(model.baseUrl)
 								? { baseUrl: safeBaseUrl(model.baseUrl) }
 								: {}),
-outcome,
-						durationMs: Date.now() - attemptStartedAt,
-						maxAttempts: Number.isFinite(emptyResponseMaxAttempts)
-							? emptyResponseMaxAttempts
-							: "unbounded",
-						retryDelayMs: emptyResponseRetryDelayMs,
+							outcome,
+							durationMs: Date.now() - attemptStartedAt,
+							maxAttempts: Number.isFinite(emptyResponseMaxAttempts)
+								? emptyResponseMaxAttempts
+								: "unbounded",
+							retryDelayMs: emptyResponseRetryDelayMs,
 							...(responseEvidence ? { response: responseEvidence } : {}),
 							...(payloadEvidence ? { payload: payloadEvidence } : {}),
 							events: eventEvidence,
@@ -1075,7 +1078,38 @@ outcome,
 						});
 					};
 					if (options?.signal?.aborted) throw abortError();
-					const inner = api().streamSimple(model, context, {
+					const pendingToolEvents: Parameters<typeof stream.push>[0][] = [];
+					const publish = (rawEvent: AssistantMessageEvent) => {
+						if (rawEvent.type === "start") {
+							if (progressHeartbeat?.enabled || startForwarded) return;
+							startForwarded = true;
+						}
+						const prior = continuedContent;
+						const offset = prior.length;
+						let event = rawEvent;
+						if (offset > 0 && "contentIndex" in event) {
+							event = { ...event, contentIndex: event.contentIndex + offset };
+						}
+						if ("partial" in event) {
+							const currentContent = event.type.startsWith("toolcall_")
+								? event.partial.content
+								: event.partial.content.filter(
+									(block) => block.type !== "toolCall" || isCompleteToolCall(block),
+								);
+							event = {
+								...event,
+								partial: { ...event.partial, content: [...prior, ...currentContent] },
+							};
+						}
+						if (offset > 0 && event.type === "done") {
+							event = {
+								...event,
+								message: { ...event.message, content: [...prior, ...event.message.content] },
+							};
+						}
+						stream.push(event);
+					};
+					const inner = api().streamSimple(model, continuationContext, {
 						...options,
 						onPayload: async (payload, payloadModel) => {
 							const transformed = enforceOpenLimitsReasoningEffort(
@@ -1151,12 +1185,22 @@ outcome,
 						// The synthetic start emitted by the heartbeat already opens the
 						// assistant message for Pi. Suppress the provider's duplicate start;
 						// the real terminal message still replaces the synthetic partial.
-						if (event.type === "start" && progressHeartbeat?.enabled) continue;
+						if (event.type === "start" && (progressHeartbeat?.enabled || startForwarded)) continue;
 						if (isAssistantContentEvent(event)) attemptProducedContent = true;
+						if ("partial" in event && Array.isArray(event.partial.content)) {
+							latestPartialContent = event.partial.content as AssistantMessage["content"];
+						}
+						const isToolEvent = event.type.startsWith("toolcall_");
+						if (
+							(event.type !== "start" &&
+								event.type !== "done" &&
+								event.type !== "error") ||
+							(event.type === "start" && attemptProducedContent)
+						)
+							attemptPublishedOutput = true;
 						// pi-ai surfaces a few HTTP-success stream truncations as an
 						// assistant error event. They are invalid responses, not a
-						// transient upstream failure: keep all events private and run the
-						// attempt through the bounded empty-response budget.
+						// transient upstream failure; these trigger continuation recovery.
 						if (
 							eventError &&
 							successfulResponse &&
@@ -1222,36 +1266,35 @@ outcome,
 							});
 						}
 						if ((responseTransient || effectiveEventKind) && !validResponse) {
-							// Nothing from a transient attempt is visible to Pi yet, so it is
-							// safe to discard its buffered events and retry it.
-							shouldRetry = true;
-							continue;
+							// Transparent retries are safe only before assistant content escapes.
+							if (!attemptPublishedOutput) {
+								shouldRetry = true;
+								continue;
+							}
 						}
 						if (event.type === "error") {
-							// Discard any buffered partial attempt on a terminal provider
-							// error; exposing it would look like a completed response.
-							bufferedEvents.length = 0;
-							stream.push(event);
+							publish(event);
 							terminalError = true;
 							break;
 						}
 						if (isValidDoneEvent(event)) {
 							validResponse = true;
-							for (const buffered of bufferedEvents) stream.push(buffered);
-							bufferedEvents.length = 0;
-							stream.push(event);
+							publish(event);
 							// `done` is terminal by the pi-ai stream contract. Do not
 							// inspect or forward anything a broken transport emits after it.
 							break;
 						}
 						if (event.type === "done") {
-							// An empty/reasoning-only done is not a successful response. Stop
-							// this attempt now so the recovery decision can distinguish a
-							// silent empty attempt from a stream that already leaked content.
-							bufferedEvents.push(event);
+							// An empty/reasoning-only done is not a successful response.
 							break;
 						}
-						bufferedEvents.push(event);
+						if (isToolEvent) {
+							pendingToolEvents.push(event);
+							if (event.type === "toolcall_end") {
+								for (const toolEvent of pendingToolEvents) publish(toolEvent);
+								pendingToolEvents.length = 0;
+							}
+						} else publish(event);
 					}
 					if (!validResponse && options?.signal?.aborted) throw abortError();
 					const transientAttemptsExhausted =
@@ -1284,8 +1327,19 @@ outcome,
 						const contextOverflowTerminal =
 							likelyContextOverflow &&
 							invalidSuccessfulStream &&
-							(!attemptProducedContent || emptyResponseAttempts > 1);
+							(attemptPublishedOutput ||
+								!attemptProducedContent ||
+								emptyResponseAttempts > 1);
+						// Only terminally fail a streamed attempt when continuation is unsafe
+						// or its configured retry budget has been exhausted.
+						const streamedAttemptFailed =
+							attemptPublishedOutput && invalidSuccessfulStream;
+						const canContinue =
+							invalidSuccessfulStream &&
+							(attemptPublishedOutput || pendingToolEvents.length > 0) &&
+							continuationAttempts < emptyResponseMaxAttempts;
 						if (
+							(streamedAttemptFailed && !canContinue) ||
 							emptyResponseAttempts >= emptyResponseMaxAttempts ||
 							contextOverflowTerminal
 						) {
@@ -1293,7 +1347,9 @@ outcome,
 							recordInvalidResponseEvidence(emptyOutcome);
 							const diagnostic = contextOverflowTerminal
 								? `Your input exceeds the context window of this model. OpenLimits returned an invalid HTTP 2xx stream after ${emptyResponseAttempts} attempt(s) (${emptyOutcome}; estimated context ${estimatedContextTokens}/${contextWindow} tokens).`
-								: `OpenLimits response validation budget exhausted after ${emptyResponseAttempts} invalid HTTP 2xx stream(s) (${emptyOutcome}).`;
+								: streamedAttemptFailed
+									? `OpenLimits stream ended unexpectedly after content was delivered (${emptyOutcome}); the response was not replayed to avoid duplicate output.`
+									: `OpenLimits response validation budget exhausted after ${emptyResponseAttempts} invalid HTTP 2xx stream(s) (${emptyOutcome}).`;
 							// The terminal assistant message pushed below already carries
 							// this exact diagnostic and Pi renders it in the transcript; a
 							// matching toast would only repeat the same line a second time.
@@ -1327,16 +1383,40 @@ outcome,
 							});
 							break;
 						}
-						await waitForEmptyResponseRetry(
+						if (canContinue) {
+							const visibleContent = (latestPartialContent ?? []).filter(
+								(block) => block.type !== "toolCall" || isCompleteToolCall(block),
+							);
+							continuedContent = [...continuedContent, ...visibleContent];
+							const messages = [...context.messages];
+							if (continuedContent.length > 0) {
+								messages.push({
+									role: "assistant",
+									content: continuedContent,
+									api: model.api,
+									provider: model.provider,
+									model: model.id,
+									usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+									stopReason: "length",
+									timestamp: Date.now(),
+								});
+							}
+							messages.push({ role: "user", content: "Continue from the exact end of the preceding assistant message. Do not repeat any content already present. Continue naturally from where it stopped. Any incomplete tool call was discarded; do not emit it again unless necessary to finish the user's task.", timestamp: Date.now() });
+							continuationContext = { ...context, messages };
+							continuationAttempts += 1;
+							shouldRetry = true;
+						} else await waitForEmptyResponseRetry(
 							options?.signal,
 							emptyResponseRetryDelayMs,
 						);
 						if (options?.signal?.aborted) throw abortError();
 						recordInvalidResponseEvidence(emptyOutcome);
 						display(
-							emptyOutcome === "reasoning_only"
-								? "OpenLimits: respuesta solo con razonamiento; falta texto o tool call, reintentando…"
-								: "OpenLimits: stream vacío o incompleto; reintentando…",
+							canContinue
+								? "OpenLimits: continuando la respuesta interrumpida…"
+								: emptyOutcome === "reasoning_only"
+									? "OpenLimits: respuesta solo con razonamiento; falta texto o tool call, reintentando…"
+									: "OpenLimits: stream vacío o incompleto; reintentando…",
 							"info",
 						);
 						shouldRetry = true;
@@ -1361,11 +1441,7 @@ outcome,
 						wasRecovering = false;
 					}
 					if (terminalError) break;
-					if (shouldRetry) {
-						bufferedEvents.length = 0;
-						continue;
-					}
-					for (const buffered of bufferedEvents) stream.push(buffered);
+					if (shouldRetry) continue;
 					break;
 				}
 			} catch (error) {
@@ -1542,8 +1618,8 @@ function isValidDoneEvent(event: unknown): boolean {
 
 /**
  * Detect events that carry substantive assistant content while an attempt is
- * being buffered. `start` is included only when its partial already contains
- * a substantive block; ordinary empty starts are not truncated content.
+ * streaming. `start` is included only when its partial already contains a
+ * substantive block; ordinary empty starts are not truncated content.
  */
 function isAssistantContentEvent(event: unknown): boolean {
 	if (typeof event !== "object" || event === null) return false;
@@ -1613,6 +1689,18 @@ function isAssistantContentEvent(event: unknown): boolean {
 			value.arguments !== null
 		);
 	});
+}
+
+function isCompleteToolCall(block: AssistantMessage["content"][number]): boolean {
+	return (
+		block.type === "toolCall" &&
+		typeof block.id === "string" &&
+		block.id.length > 0 &&
+		typeof block.name === "string" &&
+		block.name.length > 0 &&
+		typeof block.arguments === "object" &&
+		block.arguments !== null
+	);
 }
 
 type CatalogKey = keyof LiveCatalog;

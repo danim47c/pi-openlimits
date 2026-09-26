@@ -14,9 +14,14 @@ provider.
   `text_*` / `thinking_*` / `toolcall_*` events, then a terminal `done`. A
   terminal `error` replaces `done` when recovery fails. Stream contract lives
   in `@earendil-works/pi-ai`; this provider only adds retries on top.
-- All provider content events are buffered per attempt. They are forwarded to
-  the consumer only after a valid terminal `done`. Truncations and invalid 2xx
-  responses therefore do not duplicate partial output. A separate no-op
+- Text, thinking, and completed tool-call events are forwarded as soon as they
+  arrive; a successful response is never held back until `done`. Incomplete
+  tool-call events are held until arguments are complete, so an interrupted
+  call can be discarded without exposing a malformed call to Pi. On a truncated
+  response, the provider continues from streamed assistant content instead of
+  replaying it from the beginning; incomplete tool calls are omitted from that
+  continuation context. A continuation that cannot safely be formed ends with
+  an explicit error. A separate no-op
   `thinking_delta` heartbeat may be emitted for a real Pi session; it carries
   no content and is never included in the final assistant message.
 - Cancellation always wins. An aborted request forwards `error` with
@@ -36,7 +41,8 @@ is expected, not a stuck child:
   thinking does not get flagged as `needs_attention` by `pi-subagents`.
 
 Normal Pi requests carry a `sessionId`, so the provider emits a no-op
-`thinking_delta` heartbeat every 30 seconds while real content is buffered.
+`thinking_delta` heartbeat every 30 seconds while waiting for the upstream's
+first events.
 That advances `message_update` activity without changing the assistant output.
 A direct caller that omits `sessionId` intentionally gets the historical silent
 stream behaviour. If an orchestrator still reports a quiet child, treat a gap
@@ -69,17 +75,16 @@ status before steering, interrupting, or relaunching it.
 - Finite budgets remain available for tests or intentionally bounded
   integrations through `EmptyResponseRetryPolicy.rateLimitMaxAttempts` /
   `overloadMaxAttempts`. Leaving them unset is the production default.
-- HTTP 2xx streams that close cleanly but emit no assistant content
-  (`empty_stream`, `reasoning_only`, or `truncated_stream` per the diagnostic
-  log below) are treated the same way as 429 and 5xx: the attempt is retried
-  indefinitely on the same 5 s cadence so a transient empty stream from a
-  warming-up model does not stall a Pi session. The unbounded default lives
-  in `EMPTY_RESPONSE_MAX_ATTEMPTS = Number.POSITIVE_INFINITY`; pass a finite
-  `EmptyResponseRetryPolicy.maxAttempts` only when you explicitly need a
-  bounded integration. Cancellation, the orchestrator's `timeoutMs`, and the
-  pi-subagents Watchdog are the only ways to break the wait. The diagnostic
-  log records `maxAttempts: "unbounded"` for every such attempt so the
-  effective budget is always visible.
+- HTTP 2xx streams with no events beyond `start` may be retried as empty
+  responses (`empty_stream`, `reasoning_only`, or `truncated_stream` in the
+  diagnostic log). After content has streamed, a truncated response is
+  continued using the partial assistant content and an instruction not to repeat
+  it; it is never replayed from the original prompt. Incomplete tool calls are
+  discarded and not included in that continuation. Continuations obey the same
+  `EmptyResponseRetryPolicy.maxAttempts` budget (unbounded by default via
+  `EMPTY_RESPONSE_MAX_ATTEMPTS = Number.POSITIVE_INFINITY`); pass a finite
+  `EmptyResponseRetryPolicy.maxAttempts` for bounded integrations. Cancellation,
+  `timeoutMs`, and the pi-subagents Watchdog can still stop a retry wait.
 
 ## Notice noise and bounded-fallback diagnostic
 
@@ -158,8 +163,8 @@ control event stream instead — those already surface the silent phases.
 - `options.signal` is honoured by the rate-limit wait
   (`OpenLimitsTransientRecovery.wait`), by the empty-response retry delay
   (`waitForEmptyResponseRetry`), and by the inner generator. Aborting a
-  request never triggers an empty-response retry and never reclassifies a
-  truncated stream.
+  request never triggers a retry and always ends with `stopReason: "aborted"`;
+  any already-streamed content remains visible before that terminal event.
 - `recordSuccess` and `recordFailure` are synchronous at the recovery layer
   so the provider stream cannot be blocked on persistence. Diagnostics flush
   asynchronously and cannot affect the stream.

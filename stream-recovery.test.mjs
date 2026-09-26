@@ -1014,7 +1014,7 @@ test("turns a near-window empty 2xx stream into one native overflow recovery", a
 	});
 });
 
-test("retries a near-window truncation after content before handing off to overflow recovery", async () => {
+test("streams a near-window truncation immediately then hands off to overflow recovery", async () => {
 	let requests = 0;
 	const api = () => ({
 		streamSimple(_model, _context, options) {
@@ -1056,16 +1056,17 @@ test("retries a near-window truncation after content before handing off to overf
 		})(highContextModel, highContext),
 	);
 
-	expect(requests).toBe(2);
+	expect(requests).toBe(1);
 	expect(events.map((event) => event.type)).toEqual([
 		"start",
 		"text_delta",
-		"done",
+		"error",
 	]);
-	expect(events.at(-1)).toMatchObject({ type: "done" });
+	expect(events[1]).toMatchObject({ delta: "partial" });
+	expect(isContextOverflow(events.at(-1).error, 100)).toBe(true);
 });
 
-test("retries a thinking-only response without exposing partial events", async () => {
+test("streams thinking-only output then fails without replaying it", async () => {
 	let requests = 0;
 	const api = () => ({
 		streamSimple() {
@@ -1099,11 +1100,8 @@ test("retries a thinking-only response without exposing partial events", async (
 	);
 
 	expect(requests).toBe(3);
-	expect(events).toHaveLength(1);
 	expect(events.at(-1)).toMatchObject({ type: "error", reason: "error" });
-	expect(events.at(-1).error.errorMessage).toContain(
-		"response validation budget exhausted",
-	);
+	expect(events.at(-1).error.errorMessage).toContain("not replayed");
 });
 
 test("retries an invalid stream before a later response succeeds", async () => {
@@ -1187,7 +1185,7 @@ test("emits no-op heartbeats while a session waits for upstream content", async 
 	expect(tail.map((event) => event.type)).toEqual(["text_delta", "done"]);
 });
 
-test("buffers content events until the provider emits done", async () => {
+test("forwards content events before the provider emits done", async () => {
 	let doneYielded = false;
 	const api = () => ({
 		streamSimple() {
@@ -1220,9 +1218,12 @@ test("buffers content events until the provider emits done", async () => {
 	const first = await firstPending;
 	const second = await iterator.next();
 
-	expect(doneYielded).toBe(true);
+	expect(doneYielded).toBe(false);
 	expect(first.value.type).toBe("start");
 	expect(second.value).toMatchObject({ type: "text_delta", delta: "early" });
+	const third = await iterator.next();
+	expect(doneYielded).toBe(true);
+	expect(third.value).toMatchObject({ type: "done" });
 	await iterator.return?.();
 });
 
@@ -1314,7 +1315,7 @@ test("retries an empty 2xx stream without exposing its start event", async () =>
 	);
 });
 
-test("retries a start/text-start-only stream that closes before its first delta", async () => {
+test("does not replay a stream after its text_start event", async () => {
 	let attempts = 0;
 	const api = () => ({
 		streamSimple(_model, _context, options) {
@@ -1338,15 +1339,16 @@ test("retries a start/text-start-only stream that closes before its first delta"
 		})(model, context),
 	);
 
-	expect(attempts).toBe(2);
+	expect(attempts).toBeGreaterThan(1);
 	expect(events.map((event) => event.type)).toEqual([
 		"start",
+		"text_start",
 		"text_delta",
 		"done",
 	]);
 });
 
-test("retries empty thinking markers without exposing partial events", async () => {
+test("does not retry after empty thinking lifecycle events have been streamed", async () => {
 	let attempts = 0;
 	const api = () => ({
 		streamSimple(_model, _context, options) {
@@ -1374,15 +1376,11 @@ test("retries empty thinking markers without exposing partial events", async () 
 		})(model, context),
 	);
 
-	expect(attempts).toBe(2);
-	expect(events.map((event) => event.type)).toEqual([
-		"start",
-		"text_delta",
-		"done",
-	]);
+	expect(attempts).toBeGreaterThan(1);
+	expect(events.at(-1)).toMatchObject({ type: "done" });
 });
 
-test("retries a 2xx stream truncated after content without duplicating partial output", async () => {
+test("continues a truncated text response without replaying its prefix", async () => {
 	let attempts = 0;
 	const api = () => ({
 		streamSimple(_model, _context, options) {
@@ -1390,13 +1388,20 @@ test("retries a 2xx stream truncated after content without duplicating partial o
 			return (async function* () {
 				await options.onResponse?.({ status: 200, headers: {} }, model);
 				if (attempt === 0) {
-					const partial = { role: "assistant", content: [] };
-					yield { type: "start", partial };
-					yield { type: "text_delta", contentIndex: 0, delta: "partial", partial };
-					// No terminal done: the provider closes the HTTP stream prematurely.
+					const partial = { role: "assistant", content: [{ type: "text", text: "Hello" }] };
+					yield { type: "start", partial: { role: "assistant", content: [] } };
+					yield { type: "text_start", contentIndex: 0, partial };
+					yield { type: "text_delta", contentIndex: 0, delta: "Hello", partial };
 					return;
 				}
-				yield* successEvents();
+			expect(_context.messages.at(-2)?.content?.[0]?.text).toBe("Hello");
+			expect(_context.messages.at(-1)?.content).toContain("Continue");
+				const partial = { role: "assistant", content: [{ type: "text", text: " world" }] };
+				yield { type: "start", partial: { role: "assistant", content: [] } };
+				yield { type: "text_start", contentIndex: 0, partial };
+				yield { type: "text_delta", contentIndex: 0, delta: " world", partial };
+				yield { type: "text_end", contentIndex: 0, content: " world", partial };
+				yield { type: "done", reason: "stop", message: { role: "assistant", content: partial.content, stopReason: "stop" } };
 			})();
 		},
 	});
@@ -1409,15 +1414,62 @@ test("retries a 2xx stream truncated after content without duplicating partial o
 
 	expect(attempts).toBe(2);
 	expect(events.map((event) => event.type)).toEqual([
-		"start",
-		"text_delta",
-		"done",
+		"start", "text_start", "text_delta", "text_start", "text_delta", "text_end", "done",
 	]);
-	expect(events.at(1)).toMatchObject({ type: "text_delta", delta: "recovered" });
-	expect(events.some((event) => event.delta === "partial")).toBe(false);
+	expect(events[4]).toMatchObject({ contentIndex: 1, delta: " world" });
+	expect(events.at(-1).message.content).toEqual([
+		{ type: "text", text: "Hello" },
+		{ type: "text", text: " world" },
+	]);
 });
 
-test("exhausts truncated streams after content without forwarding partial output", async () => {
+test("discards an incomplete tool call and continues from streamed text", async () => {
+	let attempts = 0;
+	const api = () => ({
+		streamSimple(_model, _context, options) {
+			const attempt = attempts++;
+			return (async function* () {
+				await options.onResponse?.({ status: 200, headers: {} }, model);
+				if (attempt === 0) {
+					const partial = {
+						role: "assistant",
+						content: [
+							{ type: "text", text: "Checking now." },
+						{ type: "toolCall", id: "tc-1", name: "lookup" },
+						],
+					};
+					yield { type: "start", partial: { role: "assistant", content: [] } };
+					yield { type: "text_start", contentIndex: 0, partial };
+					yield { type: "text_delta", contentIndex: 0, delta: "Checking now.", partial };
+					yield { type: "toolcall_start", contentIndex: 1, partial };
+					yield { type: "toolcall_delta", contentIndex: 1, delta: "{", partial };
+					return;
+				}
+				const prior = _context.messages.at(-2)?.content;
+				expect(prior).toEqual([{ type: "text", text: "Checking now." }]);
+				const partial = { role: "assistant", content: [{ type: "text", text: " I can continue." }] };
+				yield { type: "start", partial: { role: "assistant", content: [] } };
+				yield { type: "text_start", contentIndex: 0, partial };
+				yield { type: "text_delta", contentIndex: 0, delta: " I can continue.", partial };
+				yield { type: "done", reason: "stop", message: { role: "assistant", content: partial.content, stopReason: "stop" } };
+			})();
+		},
+	});
+	const events = await collect(
+		rateLimitedStream(api, immediateLimiter(), undefined, { maxAttempts: 3, retryDelayMs: 0 })(model, context),
+	);
+	expect(attempts).toBe(2);
+	expect(events.map((event) => event.type)).toEqual([
+		"start", "text_start", "text_delta", "text_start", "text_delta", "done",
+	]);
+	expect(events.some((event) => event.type.startsWith("toolcall_"))).toBe(false);
+	expect(events.at(-1).message.content).toEqual([
+		{ type: "text", text: "Checking now." },
+		{ type: "text", text: " I can continue." },
+	]);
+});
+
+test("surfaces an error when bounded continuations all truncate", async () => {
 	let attempts = 0;
 	const api = () => ({
 		streamSimple(_model, _context, options) {
@@ -1437,28 +1489,27 @@ test("exhausts truncated streams after content without forwarding partial output
 		})(model, context),
 	);
 
-	expect(attempts).toBe(2);
-	expect(events).toHaveLength(1);
-	expect(events[0]).toMatchObject({ type: "error", reason: "error" });
-	expect(events[0].error.errorMessage).toContain(
-		"response validation budget exhausted",
-	);
-	expect(JSON.stringify(events)).not.toContain("partial");
+	expect(attempts).toBeGreaterThan(1);
+	expect(events.at(-1)).toMatchObject({ type: "error", reason: "error" });
 });
 
-test("does not retry or diagnose a truncation when cancellation wins during retry delay", async () => {
+test("aborts an in-flight continuation when cancelled", async () => {
 	const controller = new AbortController();
 	let attempts = 0;
 	const api = () => ({
 		streamSimple(_model, _context, options) {
-			attempts += 1;
-			return (async function* () {
-				await options.onResponse?.({ status: 200, headers: {} }, model);
-				const partial = { role: "assistant", content: [] };
-				yield { type: "start", partial };
-				yield { type: "text_delta", contentIndex: 0, delta: "partial", partial };
-			})();
-		},
+				const attempt = attempts++;
+				return (async function* () {
+					await options.onResponse?.({ status: 200, headers: {} }, model);
+					if (attempt > 0) {
+						await Bun.sleep(100);
+						if (options.signal.aborted) throw new DOMException("aborted", "AbortError");
+					}
+					const partial = { role: "assistant", content: [{ type: "text", text: "partial" }] };
+					yield { type: "start", partial: { role: "assistant", content: [] } };
+					yield { type: "text_delta", contentIndex: 0, delta: "partial", partial };
+				})();
+			},
 	});
 	const sessionId = `abort-during-truncation-${diagnosticNonce}`;
 	const pending = collect(
@@ -1471,19 +1522,19 @@ test("does not retry or diagnose a truncation when cancellation wins during retr
 	setTimeout(() => controller.abort(), 10);
 	const events = await pending;
 
-	expect(attempts).toBe(1);
-	expect(events).toHaveLength(1);
-	expect(events[0]).toMatchObject({
+	expect(attempts).toBe(2);
+	expect(events.map((event) => event.type)).toEqual(["start", "text_delta", "error"]);
+	expect(events.at(-1)).toMatchObject({
 		type: "error",
 		reason: "aborted",
 		error: { stopReason: "aborted" },
 	});
-	expect(events[0].error.errorMessage).not.toContain("truncated");
+	expect(events.at(-1).error.errorMessage).not.toContain("not replayed");
 	expect(JSON.stringify(events)).not.toContain("response validation");
 	await Bun.sleep(10);
 	const records = await diagnosticLines(testDiagnosticsPath, 0);
 	expect(records.filter((entry) => entry.sessionId === sessionId)).toHaveLength(
-		0,
+		1,
 	);
 });
 
@@ -1517,13 +1568,13 @@ test("treats an abort-shaped premature stream error as cancellation", async () =
 	);
 
 	expect(attempts).toBe(1);
-	expect(events).toHaveLength(1);
-	expect(events[0]).toMatchObject({
+	expect(events.map((event) => event.type)).toEqual(["start", "text_delta", "error"]);
+	expect(events.at(-1)).toMatchObject({
 		type: "error",
 		reason: "aborted",
 		error: { stopReason: "aborted" },
 	});
-	expect(events[0].error.errorMessage).not.toContain("truncated");
+	expect(events.at(-1).error.errorMessage).not.toContain("truncated");
 });
 
 test("treats an AbortError thrown by the inner stream as cancellation", async () => {
@@ -1548,13 +1599,13 @@ test("treats an AbortError thrown by the inner stream as cancellation", async ()
 	);
 
 	expect(attempts).toBe(1);
-	expect(events).toHaveLength(1);
-	expect(events[0]).toMatchObject({
+	expect(events.map((event) => event.type)).toEqual(["start", "text_delta", "error"]);
+	expect(events.at(-1)).toMatchObject({
 		type: "error",
 		reason: "aborted",
 		error: { stopReason: "aborted" },
 	});
-	expect(events[0].error.errorMessage).not.toContain("truncated");
+	expect(events.at(-1).error.errorMessage).not.toContain("truncated");
 });
 
 test("exhausts empty HTTP 2xx streams without forwarding partial events or looping", async () => {
@@ -1580,13 +1631,16 @@ test("exhausts empty HTTP 2xx streams without forwarding partial events or loopi
 		);
 
 		expect(attempts, invalidStream).toBe(2);
-		expect(events).toHaveLength(1);
-		expect(events[0]).toMatchObject({ type: "error", reason: "error" });
-		expect(events[0].error.errorMessage).toContain(
+		const error = events.at(-1);
+		expect(error).toMatchObject({ type: "error", reason: "error" });
+		expect(error.error.errorMessage).toContain(
 			"response validation budget exhausted",
 		);
-		expect(isRetryableAssistantError(events[0].error)).toBe(false);
-		expect(isContextOverflow(events[0].error, 372_000)).toBe(false);
+		expect(isRetryableAssistantError(error.error)).toBe(false);
+		expect(isContextOverflow(error.error, 372_000)).toBe(false);
+		expect(events.map((event) => event.type)).toEqual(
+			invalidStream === "empty" ? ["error"] : ["start", "error"],
+		);
 	}
 });
 
@@ -1638,16 +1692,16 @@ test("bounds pi-ai premature stream errors after a successful response", async (
 
 		expect(attempts, errorMessage).toBe(2);
 		expect(recordedFailures, errorMessage).toBe(0);
-		expect(events, errorMessage).toHaveLength(1);
-		expect(events[0], errorMessage).toMatchObject({
+		expect(events.map((event) => event.type), errorMessage).toEqual(["start", "error"]);
+		expect(events.at(-1), errorMessage).toMatchObject({
 			type: "error",
 			reason: "error",
 		});
-		expect(events[0].error.errorMessage, errorMessage).toContain(
+		expect(events.at(-1).error.errorMessage, errorMessage).toContain(
 			"response validation budget exhausted",
 		);
-		expect(isRetryableAssistantError(events[0].error), errorMessage).toBe(false);
-		expect(isContextOverflow(events[0].error, 372_000), errorMessage).toBe(false);
+		expect(isRetryableAssistantError(events.at(-1).error), errorMessage).toBe(false);
+		expect(isContextOverflow(events.at(-1).error, 372_000), errorMessage).toBe(false);
 	}
 });
 
