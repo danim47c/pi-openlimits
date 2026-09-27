@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import openlimitsPlugin, { isOpenLimitsUpstreamRejection } from "./index.ts";
+import openlimitsPlugin, {
+  defaultOpenLimitsReasoning,
+  isOpenLimitsUpstreamRejection,
+} from "./index.ts";
 import { isRetryableAssistantError } from "./node_modules/@earendil-works/pi-ai/dist/utils/retry.js";
 import { isContextOverflow } from "./node_modules/@earendil-works/pi-ai/dist/utils/overflow.js";
+import { ANTHROPIC_MODELS } from "./catalog.ts";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -54,6 +58,20 @@ describe("provider registration", () => {
     });
     for (const provider of providers.values())
       expect(provider.refreshModels).toBeFunction();
+  });
+
+  test("defaults Claude reasoning instead of disabling it when omitted", () => {
+    const opus = {
+      ...ANTHROPIC_MODELS.find((candidate) => candidate.id === "claude-opus-5.5"),
+      provider: "openlimits-claude",
+    };
+    const olderOpus = {
+      ...ANTHROPIC_MODELS.find((candidate) => candidate.id === "claude-opus-5"),
+      provider: "openlimits-claude",
+    };
+    expect(defaultOpenLimitsReasoning(opus, undefined)).toBe("medium");
+    expect(defaultOpenLimitsReasoning(olderOpus, undefined)).toBe("high");
+    expect(defaultOpenLimitsReasoning(opus, "xhigh")).toBe("xhigh");
   });
 
   test("preserves aborted request semantics while waiting", async () => {
@@ -208,6 +226,48 @@ describe("provider registration", () => {
         },
       ],
     });
+  });
+
+  test("normalizes cached Claude Opus 5.5 metadata without network access", async () => {
+    const provider = loadProviders().get("openlimits-claude");
+    const models = await provider.refreshModels({
+      store: memoryStore({
+        checkedAt: Date.now(),
+        models: [
+          {
+            id: "claude-opus-5.5",
+            name: "Claude Opus 5.5 (OpenLimits)",
+            provider: "openlimits-claude",
+            api: "anthropic-messages",
+            reasoning: true,
+            input: ["text", "image"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 200_000,
+            maxTokens: 128_000,
+            thinkingLevelMap: { off: null, xhigh: "ultracode" },
+            compat: { supportsTemperature: true },
+          },
+        ],
+      }),
+      allowNetwork: false,
+    });
+
+    expect(models[0]).toMatchObject({
+      id: "claude-opus-5.5",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+      thinkingLevelMap: {
+        off: null,
+        minimal: "low",
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: "xhigh",
+        max: "max",
+      },
+      compat: { forceAdaptiveThinking: true, supportsTemperature: false },
+    });
+    expect(models[0].cost.input).toBeGreaterThan(0);
   });
 
   test("normalizes cached GPT Chat Completions compat without network access", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
+import { openAICompletionsApi, streamSimple } from "@earendil-works/pi-ai/compat";
 import {
   ANTHROPIC_MODELS,
   CHAT_MODELS,
@@ -66,6 +66,50 @@ describe("catalog compatibility", () => {
       expect(model.thinkingLevelMap.max).toBe("max");
       expect(model.compat?.forceAdaptiveThinking).toBe(true);
     }
+  });
+
+  test("Claude Opus 5.5 exposes supported effort levels and sends native xhigh", async () => {
+    const model = ANTHROPIC_MODELS.find((candidate) => candidate.id === "claude-opus-5.5");
+    expect(model).toBeDefined();
+    expect(model.thinkingLevelMap).toMatchObject({
+      off: null,
+      minimal: "low",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+    });
+
+    const originalFetch = globalThis.fetch;
+    let payload;
+    globalThis.fetch = async (_url, init) => {
+      payload = JSON.parse(init.body);
+      return new Response("data: [DONE]\\n\\n", {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    };
+    try {
+      const apiModel = {
+        ...model,
+        api: "anthropic-messages",
+        provider: "openlimits-claude",
+        baseUrl: "https://openlimits.app",
+      };
+      try {
+        for await (const _event of streamSimple(
+          apiModel,
+          { messages: [{ role: "user", content: "Say OK.", timestamp: Date.now() }] },
+          { apiKey: "test-key", reasoning: "xhigh" },
+        )) {}
+      } catch {
+        // This fake response only needs to exercise request serialization.
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(payload.output_config).toEqual({ effort: "xhigh" });
   });
 
   test("Claude Opus 5 exposes the documented 1M context", () => {

@@ -90,6 +90,18 @@ function parseOpenLimitsRequestPayload(
 	throw new TypeError("OpenLimits provider payload must be JSON-compatible");
 }
 
+export function defaultOpenLimitsReasoning(
+	model: Model<Api>,
+	reasoning: SimpleStreamOptions["reasoning"],
+): SimpleStreamOptions["reasoning"] {
+	if (reasoning !== undefined) return reasoning;
+	if (model.provider !== "openlimits-claude" || !model.reasoning) return reasoning;
+	// Do not let an omitted UI/session option disable adaptive thinking. Opus 5.5
+	// defaults to medium in Anthropic's API; the older Claude catalog entries use
+	// high as their established default.
+	return model.id === "claude-opus-5.5" ? "medium" : "high";
+}
+
 function enforceOpenLimitsReasoningEffort(
 	payload: unknown,
 	model: Model<Api>,
@@ -1109,13 +1121,18 @@ export function rateLimitedStream(
 						}
 						stream.push(event);
 					};
+					const effectiveReasoning = defaultOpenLimitsReasoning(
+						model,
+						options?.reasoning,
+					);
 					const inner = api().streamSimple(model, continuationContext, {
 						...options,
+						reasoning: effectiveReasoning,
 						onPayload: async (payload, payloadModel) => {
 							const transformed = enforceOpenLimitsReasoningEffort(
 								(await options?.onPayload?.(payload, payloadModel)) ?? payload,
 								model,
-								options?.reasoning,
+								effectiveReasoning,
 							);
 							payloadEvidence = summarizePayload(transformed);
 							return transformed;
@@ -1940,17 +1957,20 @@ export default function openlimitsPlugin(pi: ExtensionAPI): void {
 			// changes cannot suppress reasoning compatibility, retain stale context
 			// windows, or leave the footer with an all-zero cost.
 			const normalizedCachedModels = cachedModels?.map((model) => {
-				const staticModel =
-					family === "chat"
-						? OPENLIMITS_CHAT_MODELS.find((candidate) => candidate.id === model.id)
-						: family === "responses"
-							? staticModels.find((candidate) => candidate.id === model.id)
-							: undefined;
+				const staticModel = staticModels.find(
+					(candidate) => candidate.id === model.id,
+				);
 				return {
 					...model,
-					...(staticModel?.contextWindow === undefined
-						? {}
-						: { contextWindow: staticModel.contextWindow }),
+					...(staticModel
+						? {
+							contextWindow: staticModel.contextWindow,
+							maxTokens: staticModel.maxTokens,
+						reasoning: staticModel.reasoning,
+							input: staticModel.input,
+							thinkingLevelMap: staticModel.thinkingLevelMap,
+						}
+						: {}),
 					cost: resolveModelPricing(model.id, family, pricingOverrides),
 					...(family === "chat"
 						? {

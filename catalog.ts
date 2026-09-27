@@ -107,6 +107,13 @@ const ANTHROPIC_COMPAT = {
   forceAdaptiveThinking: true,
 } as const;
 
+// Opus 5.5 supports Anthropic's five API effort values. Keep xhigh native;
+// `ultracode` is a Claude Code workflow mode, not a Messages API effort value.
+const OPUS_55_TLM = {
+  ...ANTHROPIC_TLM,
+  xhigh: "xhigh",
+} as const;
+
 export const ANTHROPIC_MODELS = [
   {
     id: "claude-opus-5.5",
@@ -116,7 +123,7 @@ export const ANTHROPIC_MODELS = [
     contextWindow: 1_000_000,
     maxTokens: 128_000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    thinkingLevelMap: { ...ANTHROPIC_TLM },
+    thinkingLevelMap: { ...OPUS_55_TLM },
     compat: { ...ANTHROPIC_COMPAT, supportsTemperature: false },
   },
   {
